@@ -1,0 +1,23 @@
+{% macro badge_stato_iscrizione(stato, descrizione=false) %}
+  {% if stato == "da_abilitare" %}
+    <span class="badge bg-warning text-dark">Da abilitare</span>
+    {% if descrizione %}<div class="small text-muted mt-1">La squadriglia può essere abilitata.</div>{% endif %}
+  {% elif stato == "in_abilitazione" %}
+    <span class="badge bg-info text-dark">Abilitazione in corso</span>
+    {% if descrizione %}<div class="small text-muted mt-1">Richiesta presa in carico: il sistema sta lavorando in background. Non è necessario premere nuovamente “Abilita”.</div>{% endif %}
+  {% elif stato == "abilitato" %}
+    <span class="badge bg-success">Abilitata</span>
+    {% if descrizione %}<div class="small text-muted mt-1">Utente e pagina WordPress risultano provisionati.</div>{% endif %}
+  {% elif stato == "failed_user" %}
+    <span class="badge bg-danger">Errore creazione utente WordPress</span>
+    {% if descrizione %}<div class="small text-danger mt-1">L’utente WordPress non è stato creato. È possibile riprovare l’abilitazione.</div>{% endif %}
+  {% elif stato == "failed_post" %}
+    <span class="badge bg-danger">Errore creazione pagina WordPress</span>
+    {% if descrizione %}<div class="small text-danger mt-1">La pagina personale non è stata completata. Il retry automatico non è disponibile: consultare un amministratore.</div>{% endif %}
+  {% elif stato == "eliminato" %}
+    <span class="badge bg-secondary">Eliminata</span>
+    {% if descrizione %}<div class="small text-muted mt-1">L’iscrizione è stata scartata.</div>{% endif %}
+  {% else %}
+    <span class="badge bg-dark">Stato non riconosciuto</span>
+  {% endif %}
+{% endmacro %}

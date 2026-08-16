@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_stato_iscrizione.html" import badge_stato_iscrizione %}
 
 {% block head %}
 
@@ -26,13 +27,19 @@
 
 <ul class="nav nav-tabs" id="myTab" role="tablist">
   <li class="nav-item" role="presentation">
-    <button class="nav-link active" id="abilitare-tab" data-bs-toggle="tab" data-bs-target="#abilitare-tab-pane" type="button" role="tab" aria-controls="abilitare-tab-pane" aria-selected="true">Da Abilitare</button>
+    <button class="nav-link active" id="abilitare-tab" data-bs-toggle="tab" data-bs-target="#abilitare-tab-pane" type="button" role="tab" aria-controls="abilitare-tab-pane" aria-selected="true">Da gestire ({{ conteggi_tab["da_gestire"] }})</button>
   </li>
   <li class="nav-item" role="presentation">
-    <button class="nav-link" id="abilitati-tab" data-bs-toggle="tab" data-bs-target="#abilitati-tab-pane" type="button" role="tab" aria-controls="abilitati-tab-pane" aria-selected="false">Abilitati</button>
+    <button class="nav-link" id="coda-tab" data-bs-toggle="tab" data-bs-target="#coda-tab-pane" type="button" role="tab" aria-controls="coda-tab-pane" aria-selected="false">In coda ({{ conteggi_tab["in_coda"] }})</button>
   </li>
   <li class="nav-item" role="presentation">
-    <button class="nav-link" id="tutti-tab" data-bs-toggle="tab" data-bs-target="#tutti-tab-pane" type="button" role="tab" aria-controls="tutti-tab-pane" aria-selected="false">Mostra Tutti</button>
+    <button class="nav-link" id="errori-tab" data-bs-toggle="tab" data-bs-target="#errori-tab-pane" type="button" role="tab" aria-controls="errori-tab-pane" aria-selected="false">Errori ({{ conteggi_tab["errori"] }})</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="abilitati-tab" data-bs-toggle="tab" data-bs-target="#abilitati-tab-pane" type="button" role="tab" aria-controls="abilitati-tab-pane" aria-selected="false">Abilitate ({{ conteggi_tab["abilitate"] }})</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tutti-tab" data-bs-toggle="tab" data-bs-target="#tutti-tab-pane" type="button" role="tab" aria-controls="tutti-tab-pane" aria-selected="false">Mostra tutti</button>
   </li>
 </ul>
 
@@ -40,10 +47,10 @@
   <div class="tab-pane fade show active" id="abilitare-tab-pane" role="tabpanel" aria-labelledby="abilitare-tab" tabindex="0">
     <div class="row my-3">
       <div class="col">
-      <input type="text" class="form-control" id="cerca_gruppo" onkeyup="filtra_gruppo()" placeholder="Cerca Gruppo...">
+      <input type="text" class="form-control" id="cerca_gruppo" onkeyup="filtra_tab('cerca_gruppo', 'iscrizioni', 1)" placeholder="Cerca Gruppo...">
       </div>
       <div class="col">
-      <input type="text" class="form-control" id="cerca_nome" onkeyup="filtra_nome()" placeholder="Cerca Squadriglia...">
+      <input type="text" class="form-control" id="cerca_nome" onkeyup="filtra_tab('cerca_nome', 'iscrizioni', 2)" placeholder="Cerca Squadriglia...">
       </div>
     </div>
     <div class="table-responsive">
@@ -56,25 +63,122 @@
           <th scope="col">Squadriglia</th>
           <th scope="col">Ambito</th>
           <th scope="col">Conquista/Conferma</th>
+          <th scope="col">Stato</th>
           <th scope="col"></th>
         </tr>
       </thead>
       <tbody>
         {% for i in iscritti %}
         {% if i[0]["stato"] == "da_abilitare" %}
-        <tr>
+        <tr data-iscrizione-id="{{ i[0]["id"] }}" data-stato="{{ i[0]["stato"] }}">
           <th scope="row">{{ i[0]["id"] }}</th>
           <td>{{ i[2]["zona"].title() }}</td>
           <td>{{ i[1]["gruppo"].capitalize() }}</td>
           <td>{{ i[0]["nome"] }}</td>
           <td>{{ i[0]["specialita"] }}</td>
           <td>{{ i[0]["tipo"].capitalize() }}</td>
+          <td>{{ badge_stato_iscrizione(i[0]["stato"], true) }}</td>
           <td>
           <div class="btn-group" role="group">
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
-            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Abilita!</a>
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Abilita</a>
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
             <a type="button" class="btn btn-outline-danger" href="{{ url_for("elimina", id_iscrizione=i[0]["id"]) }}">Scarta</a>
+          </div>
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="tab-pane fade" id="coda-tab-pane" role="tabpanel" aria-labelledby="coda-tab" tabindex="0">
+    <div class="row my-3">
+      <div class="col">
+      <input type="text" class="form-control" id="cerca_gruppo_coda" onkeyup="filtra_tab('cerca_gruppo_coda', 'iscrizioni_coda', 1)" placeholder="Cerca Gruppo...">
+      </div>
+      <div class="col">
+      <input type="text" class="form-control" id="cerca_nome_coda" onkeyup="filtra_tab('cerca_nome_coda', 'iscrizioni_coda', 2)" placeholder="Cerca Squadriglia...">
+      </div>
+    </div>
+    <div class="table-responsive">
+    <table class="table" id="iscrizioni_coda">
+      <thead>
+        <tr>
+          <th scope="col">ID</th>
+          <th scope="col">Zona</th>
+          <th scope="col">Gruppo</th>
+          <th scope="col">Squadriglia</th>
+          <th scope="col">Ambito</th>
+          <th scope="col">Conquista/Conferma</th>
+          <th scope="col">Stato</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in iscritti %}
+        {% if i[0]["stato"] == "in_abilitazione" %}
+        <tr data-iscrizione-id="{{ i[0]["id"] }}" data-stato="{{ i[0]["stato"] }}">
+          <th scope="row">{{ i[0]["id"] }}</th>
+          <td>{{ i[2]["zona"].title() }}</td>
+          <td>{{ i[1]["gruppo"].capitalize() }}</td>
+          <td>{{ i[0]["nome"] }}</td>
+          <td>{{ i[0]["specialita"] }}</td>
+          <td>{{ i[0]["tipo"].capitalize() }}</td>
+          <td>{{ badge_stato_iscrizione(i[0]["stato"], true) }}</td>
+          <td><a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a></td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="tab-pane fade" id="errori-tab-pane" role="tabpanel" aria-labelledby="errori-tab" tabindex="0">
+    <div class="row my-3">
+      <div class="col">
+      <input type="text" class="form-control" id="cerca_gruppo_errori" onkeyup="filtra_tab('cerca_gruppo_errori', 'iscrizioni_errori', 1)" placeholder="Cerca Gruppo...">
+      </div>
+      <div class="col">
+      <input type="text" class="form-control" id="cerca_nome_errori" onkeyup="filtra_tab('cerca_nome_errori', 'iscrizioni_errori', 2)" placeholder="Cerca Squadriglia...">
+      </div>
+    </div>
+    <div class="table-responsive">
+    <table class="table" id="iscrizioni_errori">
+      <thead>
+        <tr>
+          <th scope="col">ID</th>
+          <th scope="col">Zona</th>
+          <th scope="col">Gruppo</th>
+          <th scope="col">Squadriglia</th>
+          <th scope="col">Ambito</th>
+          <th scope="col">Conquista/Conferma</th>
+          <th scope="col">Stato</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in iscritti %}
+        {% if i[0]["stato"] in ["failed_user", "failed_post"] %}
+        <tr data-iscrizione-id="{{ i[0]["id"] }}" data-stato="{{ i[0]["stato"] }}">
+          <th scope="row">{{ i[0]["id"] }}</th>
+          <td>{{ i[2]["zona"].title() }}</td>
+          <td>{{ i[1]["gruppo"].capitalize() }}</td>
+          <td>{{ i[0]["nome"] }}</td>
+          <td>{{ i[0]["specialita"] }}</td>
+          <td>{{ i[0]["tipo"].capitalize() }}</td>
+          <td>{{ badge_stato_iscrizione(i[0]["stato"], true) }}</td>
+          <td>
+          <div class="btn-group" role="group">
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
+            {% if i[0]["stato"] == "failed_user" %}
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Riprova abilitazione</a>
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
+            <a type="button" class="btn btn-outline-danger" href="{{ url_for("elimina", id_iscrizione=i[0]["id"]) }}">Scarta</a>
+            {% endif %}
           </div>
           </td>
         </tr>
@@ -90,10 +194,10 @@
   <div class="tab-pane fade" id="abilitati-tab-pane" role="tabpanel" aria-labelledby="abilitati-tab" tabindex="0">
     <div class="row my-3">
       <div class="col">
-      <input type="text" class="form-control" id="cerca_gruppo_abilitati" onkeyup="filtra_gruppo_abilitati()" placeholder="Cerca Gruppo...">
+      <input type="text" class="form-control" id="cerca_gruppo_abilitati" onkeyup="filtra_tab('cerca_gruppo_abilitati', 'iscrizioni_abilitati', 1)" placeholder="Cerca Gruppo...">
       </div>
       <div class="col">
-      <input type="text" class="form-control" id="cerca_nome_abilitati" onkeyup="filtra_nome_abilitati()" placeholder="Cerca Squadriglia...">
+      <input type="text" class="form-control" id="cerca_nome_abilitati" onkeyup="filtra_tab('cerca_nome_abilitati', 'iscrizioni_abilitati', 2)" placeholder="Cerca Squadriglia...">
       </div>
     </div>
     <div class="table-responsive">
@@ -106,23 +210,24 @@
           <th scope="col">Squadriglia</th>
           <th scope="col">Ambito</th>
           <th scope="col">Conquista/Conferma</th>
+          <th scope="col">Stato</th>
           <th scope="col"></th>
         </tr>
       </thead>
       <tbody>
         {% for i in iscritti %}
         {% if i[0]["stato"] == "abilitato" %}
-        <tr>
+        <tr data-iscrizione-id="{{ i[0]["id"] }}" data-stato="{{ i[0]["stato"] }}">
           <th scope="row">{{ i[0]["id"] }}</th>
           <td>{{ i[2]["zona"].title() }}</td>
           <td>{{ i[1]["gruppo"].capitalize() }}</td>
           <td>{{ i[0]["nome"] }}</td>
           <td>{{ i[0]["specialita"] }}</td>
           <td>{{ i[0]["tipo"].capitalize() }}</td>
+          <td>{{ badge_stato_iscrizione(i[0]["stato"]) }}</td>
           <td>
           <div class="btn-group" role="group">
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
-            <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
           </div>
           </td>
         </tr>
@@ -138,10 +243,10 @@
   <div class="tab-pane fade" id="tutti-tab-pane" role="tabpanel" aria-labelledby="tutti-tab" tabindex="0">
     <div class="row my-3">
       <div class="col">
-      <input type="text" class="form-control" id="cerca_gruppo_all" onkeyup="filtra_gruppo_all()" placeholder="Cerca Gruppo...">
+      <input type="text" class="form-control" id="cerca_gruppo_all" onkeyup="filtra_tab('cerca_gruppo_all', 'iscrizioni_all', 1)" placeholder="Cerca Gruppo...">
       </div>
       <div class="col">
-      <input type="text" class="form-control" id="cerca_nome_all" onkeyup="filtra_nome_all()" placeholder="Cerca Squadriglia...">
+      <input type="text" class="form-control" id="cerca_nome_all" onkeyup="filtra_tab('cerca_nome_all', 'iscrizioni_all', 2)" placeholder="Cerca Squadriglia...">
       </div>
     </div>
     <div class="table-responsive">
@@ -160,33 +265,23 @@
       </thead>
       <tbody>
         {% for i in iscritti %}
-        <tr>
+        <tr data-iscrizione-id="{{ i[0]["id"] }}" data-stato="{{ i[0]["stato"] }}">
           <th scope="row">{{ i[0]["id"] }}</th>
           <td>{{ i[2]["zona"].title() }}</td>
           <td>{{ i[1]["gruppo"].capitalize() }}</td>
           <td>{{ i[0]["nome"] }}</td>
           <td>{{ i[0]["specialita"] }}</td>
           <td>{{ i[0]["tipo"].capitalize() }}</td>
-          {% if i[0]["stato"] == "abilitato" %}
-          <td><span class="badge bg-success">Abilitato</span></td>
-          {% elif i[0]["stato"] == "da_abilitare" %}
-          <td><span class="badge bg-warning">NON Abilitato</span></td>
-          {% elif i[0]["stato"] == "in_abilitazione" %}
-          <td><span class="badge bg-secondary">Abilitazione in corso...</span></td>
-          {% elif i[0]["stato"] == "failed_user" %}
-          <td><span class="badge bg-danger">Abilitazione fallita!</span></td>
-          {% elif i[0]["stato"] == "failed_post" %}
-          <td><span class="badge bg-secondary">Creazione del Diario fallita</span></td>
-          {% elif i[0]["stato"] == "eliminato" %}
-          <td><span class="badge bg-danger">Eliminato</span></td>
-          {% endif %}
+          <td>{{ badge_stato_iscrizione(i[0]["stato"]) }}</td>
           <td>
           <div class="btn-group" role="group">
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
-            {% if i[0]["stato"] in ["da_abilitare", "failed_user"] %}
-            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Abilita!</a>
+            {% if i[0]["stato"] == "da_abilitare" %}
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Abilita</a>
+            {% elif i[0]["stato"] == "failed_user" %}
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Riprova abilitazione</a>
             {% endif %}
-            {% if i[0]["stato"] not in ["in_abilitazione", "failed_post", "eliminato"] %}
+            {% if i[0]["stato"] in ["da_abilitare", "failed_user"] %}
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
             {% endif %}
             {% if i[0]["stato"] in ["da_abilitare", "failed_user"] %}
@@ -208,121 +303,15 @@
 </div>
 
 <script>
-function filtra_nome() {
-  // Declare variables
+function filtra_tab(inputId, tableId, columnIndex) {
   var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_nome");
+  input = document.getElementById(inputId);
   filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni");
+  table = document.getElementById(tableId);
   tr = table.getElementsByTagName("tr");
 
   for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[2];
-    if (td) {
-      txtValue = td.textContent || td.innerText;
-      if (txtValue.toUpperCase().indexOf(filter) > -1) {
-        tr[i].style.display = "";
-      } else {
-        tr[i].style.display = "none";
-      }
-    }
-  }
-}
-
-function filtra_gruppo() {
-  // Declare variables
-  var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_gruppo");
-  filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni");
-  tr = table.getElementsByTagName("tr");
-
-  for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[1];
-    if (td) {
-      txtValue = td.textContent || td.innerText;
-      if (txtValue.toUpperCase().indexOf(filter) > -1) {
-        tr[i].style.display = "";
-      } else {
-        tr[i].style.display = "none";
-      }
-    }
-  }
-}
-
-function filtra_nome_abilitati() {
-  // Declare variables
-  var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_nome_abilitati");
-  filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni_abilitati");
-  tr = table.getElementsByTagName("tr");
-
-  for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[2];
-    if (td) {
-      txtValue = td.textContent || td.innerText;
-      if (txtValue.toUpperCase().indexOf(filter) > -1) {
-        tr[i].style.display = "";
-      } else {
-        tr[i].style.display = "none";
-      }
-    }
-  }
-}
-
-function filtra_gruppo_abilitati() {
-  // Declare variables
-  var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_gruppo_abilitati");
-  filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni_abilitati");
-  tr = table.getElementsByTagName("tr");
-
-  for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[1];
-    if (td) {
-      txtValue = td.textContent || td.innerText;
-      if (txtValue.toUpperCase().indexOf(filter) > -1) {
-        tr[i].style.display = "";
-      } else {
-        tr[i].style.display = "none";
-      }
-    }
-  }
-}
-
-function filtra_nome_all() {
-  // Declare variables
-  var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_nome_all");
-  filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni_all");
-  tr = table.getElementsByTagName("tr");
-
-  for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[2];
-    if (td) {
-      txtValue = td.textContent || td.innerText;
-      if (txtValue.toUpperCase().indexOf(filter) > -1) {
-        tr[i].style.display = "";
-      } else {
-        tr[i].style.display = "none";
-      }
-    }
-  }
-}
-
-function filtra_gruppo_all() {
-  // Declare variables
-  var input, filter, table, tr, td, i, txtValue;
-  input = document.getElementById("cerca_gruppo_all");
-  filter = input.value.toUpperCase();
-  table = document.getElementById("iscrizioni_all");
-  tr = table.getElementsByTagName("tr");
-
-  for (i = 0; i < tr.length; i++) {
-    td = tr[i].getElementsByTagName("td")[1];
+    td = tr[i].getElementsByTagName("td")[columnIndex];
     if (td) {
       txtValue = td.textContent || td.innerText;
       if (txtValue.toUpperCase().indexOf(filter) > -1) {

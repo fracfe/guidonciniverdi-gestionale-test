@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_stato_iscrizione.html" import badge_stato_iscrizione %}
 
 {% block head %}
 
@@ -24,9 +25,9 @@
 
   <div class="btn-group" role="group">
   {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
-  <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=iscrizione.id) }}">Abilita!</a>
+  <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=iscrizione.id) }}">{% if iscrizione.stato == "failed_user" %}Riprova abilitazione{% else %}Abilita{% endif %}</a>
   {% endif %}
-  {% if iscrizione.stato not in ["in_abilitazione", "failed_post", "eliminato"] %}
+  {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
   <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=iscrizione.id) }}">Modifica</a>
   {% endif %}
   {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
@@ -69,35 +70,21 @@
         </tr>
         <tr>
           <th scope="row">Stato</th>
-          {% if iscrizione.stato == "abilitato" %}
-          <td><span class="badge bg-success">Abilitato</span></td>
-          {% elif iscrizione.stato == "da_abilitare" %}
-          <td><span class="badge bg-warning">NON Abilitato</span></td>
-          {% elif iscrizione.stato == "in_abilitazione" %}
-          <td><span class="badge bg-secondary">Abilitazione in corso...</span></td>
-          {% elif iscrizione.stato == "failed_user" %}
-          <td><span class="badge bg-danger">Abilitazione fallita!</span></td>
-          {% elif iscrizione.stato == "failed_post" %}
-          <td><span class="badge bg-secondary">Creazione del Diario fallita</span></td>
-          {% elif iscrizione.stato == "eliminato" %}
-          <td><span class="badge bg-danger">Eliminato</span></td>
-          {% endif %}
+          <td>{{ badge_stato_iscrizione(iscrizione.stato, true) }}</td>
         </tr>
-        {% if iscrizione.stato == "abilitato" %}
+        <tr>
+          <th scope="row">Utente WordPress</th>
+          <td>{% if wordpress_user %}<span class="badge bg-success">Presente</span> {{ wordpress_user.username }}{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row">Pagina WordPress</th>
+          <td>{% if wordpress_post %}<span class="badge bg-success">Presente</span>{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</td>
+        </tr>
+        {% if iscrizione.link %}
           <tr>
             <th scope="row">Link Diario di Bordo</th>
-            <td><a href="{{ iscrizione.link }}">{{ iscrizione.link }}</a></td>
+            <td><a href="{{ iscrizione.link }}" rel="noopener noreferrer">{{ iscrizione.link }}</a></td>
           </tr>
-          {% if wordpress_user %}
-            <tr>
-              <th scope="row">Wordpress Username</th>
-              <td>{{ wordpress_user.username }}</td>
-            </tr>
-            <tr>
-              <th scope="row">Wordpress Password</th>
-              <td>{{ wordpress_user.password }}</td>
-            </tr>
-          {% endif %}
         {% endif %}
         {% if iscrizione.regione == "puglia" %}
           <tr>

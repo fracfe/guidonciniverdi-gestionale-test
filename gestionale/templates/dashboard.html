@@ -76,17 +76,21 @@ Benvenuto <strong>{{ current_user.username }}</strong>!
     type: 'doughnut',
     data: {
         labels: [
-            'Abilitati',
+            'Abilitate',
             'Da Abilitare',
+            'In Abilitazione',
+            'Errori',
             'Eliminati'
         ],
         datasets: [{
             label: 'Iscrizioni',
-            data: [{{ dati_iscrizioni["abilitate"] }}, {{ dati_iscrizioni["da_abilitare"] }}, {{ dati_iscrizioni["eliminate"] }}],
+            data: [{{ dati_iscrizioni["abilitate"] }}, {{ dati_iscrizioni["da_abilitare"] }}, {{ dati_iscrizioni["in_abilitazione"] }}, {{ dati_iscrizioni["errori"] }}, {{ dati_iscrizioni["eliminate"] }}],
             backgroundColor: [
             'rgb(25, 135, 84)',
             'rgb(255, 193, 7)',
-            'rgb(220, 53, 69)'
+            'rgb(13, 202, 240)',
+            'rgb(220, 53, 69)',
+            'rgb(108, 117, 125)'
             ],
             hoverOffset: 4
         }]

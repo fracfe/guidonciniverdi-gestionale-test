@@ -209,6 +209,18 @@ def accoda_creazione_squadriglia(iscrizione_id, username, meta):
         )
     return not job_attivo
 
+
+def conteggia_stati_iscrizioni(query):
+    return {
+        "da_abilitare": query.filter_by(stato="da_abilitare").count(),
+        "in_abilitazione": query.filter_by(stato="in_abilitazione").count(),
+        "abilitate": query.filter_by(stato="abilitato").count(),
+        "errori": query.filter(
+            IscrizioneEG.stato.in_(["failed_user", "failed_post"])
+        ).count(),
+        "eliminate": query.filter_by(stato="eliminato").count(),
+    }
+
 class StatusPercorso(db.Model):
     __tablename__ = "status_percorso"
     id = db.Column(db.Integer, primary_key=True)
@@ -308,40 +320,48 @@ def index():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    dati_iscrizioni = {"da_abilitare": 0, "abilitate": 0, "eliminate": 0, "storico": {"labels": [], "datasets": []}}
+    dati_iscrizioni = {
+        "da_abilitare": 0,
+        "in_abilitazione": 0,
+        "abilitate": 0,
+        "errori": 0,
+        "eliminate": 0,
+        "storico": {"labels": [], "datasets": []},
+    }
     stato = False
     tmp_regione = False
     if current_user.livello != "admin":
         tmp_regione = Regione.query.filter_by(id=current_user.regione).first().regione
     if current_user.livello == "iabz":
         stato = StatusPercorso.query.filter_by(regione=current_user.regione).filter_by(anno=SysOption.query.filter_by(key="AnnoCorrente").first().value).first()
-        totale_iscritti = IscrizioneEG.query.filter_by(zona=current_user.zona).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["abilitate"] = IscrizioneEG.query.filter_by(stato="abilitato").filter_by(zona=current_user.zona).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["eliminate"] = IscrizioneEG.query.filter_by(stato="eliminato").filter_by(zona=current_user.zona).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["da_abilitare"] = totale_iscritti - (dati_iscrizioni["abilitate"] + dati_iscrizioni["eliminate"])
-    if current_user.livello == "iabr":
+        query_corrente = IscrizioneEG.query.filter_by(zona=current_user.zona).filter_by(anno_percorso=stato.id)
+        dati_iscrizioni.update(conteggia_stati_iscrizioni(query_corrente))
+    if current_user.livello in ["iabr", "pattuglia"]:
         stato = StatusPercorso.query.filter_by(regione=current_user.regione).filter_by(anno=SysOption.query.filter_by(key="AnnoCorrente").first().value).first()
+        query_corrente = IscrizioneEG.query.filter_by(regione=current_user.regione).filter_by(anno_percorso=stato.id)
+        dati_iscrizioni.update(conteggia_stati_iscrizioni(query_corrente))
+    if current_user.livello == "iabr":
         for i in StatusPercorso.query.filter_by(regione=current_user.regione):
             dati_iscrizioni["storico"]["labels"].append(i.anno)
             dati_iscrizioni["storico"]["labels"].sort()
         tmp_dati_iscrizioni = {
+            "da_abilitare": [],
+            "in_abilitazione": [],
             "abilitate": [],
+            "errori": [],
             "eliminate": [],
-            "da_abilitare": []
             }
         for i in dati_iscrizioni["storico"]["labels"]:
             tmp_stato = StatusPercorso.query.filter_by(regione=current_user.regione).filter_by(anno=i).first()
-            tmp_totale_iscritti = IscrizioneEG.query.filter_by(regione=current_user.regione).filter_by(anno_percorso=tmp_stato.id).count()
-            tmp_dati_iscrizioni["abilitate"].append(IscrizioneEG.query.filter_by(stato="abilitato").filter_by(regione=current_user.regione).filter_by(anno_percorso=tmp_stato.id).count())
-            tmp_dati_iscrizioni["eliminate"].append(IscrizioneEG.query.filter_by(stato="eliminato").filter_by(regione=current_user.regione).filter_by(anno_percorso=tmp_stato.id).count())
-            tmp_dati_iscrizioni["da_abilitare"].append(tmp_totale_iscritti - (tmp_dati_iscrizioni["abilitate"][-1] + tmp_dati_iscrizioni["eliminate"][-1]))
-        dati_iscrizioni["storico"]["datasets"].append({"label": "Abilitati", "data":tmp_dati_iscrizioni["abilitate"], "backgroundColor": '#198754'})
-        dati_iscrizioni["storico"]["datasets"].append({"label": "Da Abilitare", "data":tmp_dati_iscrizioni["da_abilitare"], "backgroundColor": '#ffc107'})
-        dati_iscrizioni["storico"]["datasets"].append({"label": "Elminati", "data":tmp_dati_iscrizioni["eliminate"], "backgroundColor": '#dc3545'})
-        totale_iscritti = IscrizioneEG.query.filter_by(regione=current_user.regione).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["abilitate"] = IscrizioneEG.query.filter_by(stato="abilitato").filter_by(regione=current_user.regione).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["eliminate"] = IscrizioneEG.query.filter_by(stato="eliminato").filter_by(regione=current_user.regione).filter_by(anno_percorso=stato.id).count()
-        dati_iscrizioni["da_abilitare"] = totale_iscritti - (dati_iscrizioni["abilitate"] + dati_iscrizioni["eliminate"])
+            query_anno = IscrizioneEG.query.filter_by(regione=current_user.regione).filter_by(anno_percorso=tmp_stato.id)
+            conteggi_anno = conteggia_stati_iscrizioni(query_anno)
+            for chiave in tmp_dati_iscrizioni:
+                tmp_dati_iscrizioni[chiave].append(conteggi_anno[chiave])
+        dati_iscrizioni["storico"]["datasets"].append({"label": "Da abilitare", "data":tmp_dati_iscrizioni["da_abilitare"], "backgroundColor": '#ffc107'})
+        dati_iscrizioni["storico"]["datasets"].append({"label": "In abilitazione", "data":tmp_dati_iscrizioni["in_abilitazione"], "backgroundColor": '#0dcaf0'})
+        dati_iscrizioni["storico"]["datasets"].append({"label": "Abilitate", "data":tmp_dati_iscrizioni["abilitate"], "backgroundColor": '#198754'})
+        dati_iscrizioni["storico"]["datasets"].append({"label": "Errori", "data":tmp_dati_iscrizioni["errori"], "backgroundColor": '#dc3545'})
+        dati_iscrizioni["storico"]["datasets"].append({"label": "Eliminati", "data":tmp_dati_iscrizioni["eliminate"], "backgroundColor": '#6c757d'})
     return render_template("dashboard.html", stato=stato, regione=tmp_regione, dati_iscrizioni=dati_iscrizioni)
 
 @app.route("/gestione_regione", methods=["GET", "POST"])
@@ -392,7 +412,17 @@ def iscrizioni():
             tmp_gruppo = Gruppo.query.filter_by(id=i.gruppo).first()
             tmp_zona = Zona.query.filter_by(id=i.zona).first()
             iscritti.append((i,tmp_gruppo,tmp_zona))
-    return render_template("iscrizioni.html", iscritti=iscritti)
+    conteggi_tab = {
+        "da_gestire": sum(i[0].stato == "da_abilitare" for i in iscritti),
+        "in_coda": sum(i[0].stato == "in_abilitazione" for i in iscritti),
+        "errori": sum(
+            i[0].stato in ["failed_user", "failed_post"] for i in iscritti
+        ),
+        "abilitate": sum(i[0].stato == "abilitato" for i in iscritti),
+    }
+    return render_template(
+        "iscrizioni.html", iscritti=iscritti, conteggi_tab=conteggi_tab
+    )
 
 @app.route("/report")
 @login_required
@@ -465,15 +495,19 @@ def dettagli(id_iscrizione):
         wordpress_user = WordpressUser.query.filter_by(iscrizioni_id=int(id_iscrizione)).first()
     except:
         wordpress_user = False
-    return render_template("dettaglio_iscrizione.html", iscrizione=tmp_iscrizione, gruppo=tmp_gruppo, zona=tmp_zona, relazione=relazione, wordpress_user=wordpress_user)
+    try:
+        wordpress_post = WordpressPost.query.filter_by(iscrizioni_id=int(id_iscrizione), tipo="posts").first()
+    except:
+        wordpress_post = False
+    return render_template("dettaglio_iscrizione.html", iscrizione=tmp_iscrizione, gruppo=tmp_gruppo, zona=tmp_zona, relazione=relazione, wordpress_user=wordpress_user, wordpress_post=wordpress_post)
 
 @app.route("/elimina/<id_iscrizione>")
 @login_required
 def elimina(id_iscrizione):
     iscrizione=IscrizioneEG.query.filter_by(id=int(id_iscrizione)).first()
     try:
-        if iscrizione.stato == "abilitato":
-            flash("L'utente è già stato abilitato!", "warning")
+        if iscrizione.stato not in ["da_abilitare", "failed_user"]:
+            flash("Questa iscrizione non può essere scartata nello stato attuale.", "warning")
             return redirect(url_for("iscrizioni"))
     except:
         flash("Non ho trovato l'iscrizione!", "warning")
@@ -489,8 +523,8 @@ def elimina_def(id_iscrizione):
         return redirect(url_for("dashboard"))
     iscrizione=IscrizioneEG.query.filter_by(id=int(id_iscrizione)).first()
     try:
-        if iscrizione.stato == "abilitato":
-            flash("L'utente è già stato abilitato!", "warning")
+        if iscrizione.stato != "eliminato":
+            flash("Solo un'iscrizione eliminata può essere rimossa definitivamente.", "warning")
             return redirect(url_for("iscrizioni"))
     except:
         flash("Non ho trovato l'iscrizione!", "warning")
@@ -506,8 +540,8 @@ def elimina_def(id_iscrizione):
 def ripristina(id_iscrizione):
     iscrizione=IscrizioneEG.query.filter_by(id=int(id_iscrizione)).first()
     try:
-        if iscrizione.stato == "abilitato":
-            flash("L'utente è già stato abilitato!", "warning")
+        if iscrizione.stato != "eliminato":
+            flash("Questa iscrizione non può essere ripristinata nello stato attuale.", "warning")
             return redirect(url_for("iscrizioni"))
     except:
         flash("Non ho trovato l'iscrizione!", "warning")
@@ -530,11 +564,8 @@ def edit_iscrizione(id_iscrizione):
     for i in gruppi:
         json_gruppi[Zona.query.filter_by(id=i.zona).first().zona.upper()].append(i.gruppo.upper())
     try:
-        if iscrizione.stato == "abilitato":
-            flash("L'utente è già stato abilitato!", "warning")
-            return redirect(url_for("iscrizioni"))
-        elif iscrizione.stato == "eliminato":
-            flash("Utente eliminato. Ripristinalo per poterlo modificare.", "warning")
+        if iscrizione.stato not in ["da_abilitare", "failed_user"]:
+            flash("Questa iscrizione non può essere modificata nello stato attuale.", "warning")
             return redirect(url_for("iscrizioni"))
     except:
         flash("Non ho trovato l'iscrizione!", "warning")
@@ -601,6 +632,9 @@ def abilita(id_iscrizione):
     if not StatusPercorso.query.filter_by(regione=current_user.regione).filter_by(anno=SysOption.query.filter_by(key="AnnoCorrente").first().value).first().abilitazioni:
         return redirect(url_for("iscrizioni"))
     tmp_iscrizione = IscrizioneEG.query.filter_by(id=id_iscrizione).first()
+    if tmp_iscrizione.stato not in ["da_abilitare", "failed_user"]:
+        flash("La richiesta è già in lavorazione o non può essere riabilitata.", "warning")
+        return redirect(url_for("iscrizioni"))
     tmp_gruppo = Gruppo.query.filter_by(id=tmp_iscrizione.gruppo).first()
     tmp_zona = Zona.query.filter_by(id=tmp_iscrizione.zona).first()
     tmp_regione = Regione.query.filter_by(id=tmp_iscrizione.regione).first()
