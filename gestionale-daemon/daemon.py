@@ -14,6 +14,20 @@ import random
 import base64
 import json
 import os
+import logging
+
+
+logger = logging.getLogger("guidonciniverdi.daemon.wordpress")
+WORDPRESS_TIMEOUT = (5, 30)
+
+
+class WordpressRequestError(Exception):
+    def __init__(self, operazione, endpoint, motivo, status_http=None):
+        super().__init__(motivo)
+        self.operazione = operazione
+        self.endpoint = endpoint
+        self.motivo = motivo
+        self.status_http = status_http
 
 specialita = [
     "Alpinismo",
@@ -208,9 +222,15 @@ demone_wordpress = True
 
 def manda_mail(indirizzi, copia, titolo, testo, regione):
     session = Session()
-    session.add(CodaMail(data=datetime.now(), stato="PENDING", regione=regione, indirizzi=indirizzi, indirizzi_copia=copia, titolo=f"Guidoncini Verdi {session.query(SysOption).filter_by(key='AnnoCorrente').first().value} - {titolo}", testo=testo))
-    session.commit()
-    return True
+    try:
+        session.add(CodaMail(data=datetime.now(), stato="PENDING", regione=regione, indirizzi=indirizzi, indirizzi_copia=copia, titolo=f"Guidoncini Verdi {session.query(SysOption).filter_by(key='AnnoCorrente').first().value} - {titolo}", testo=testo))
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 def manda_telegram(chat_id, titolo, testo):
     session = Session()
@@ -223,28 +243,93 @@ def genera_password_sq():
     colori = ["Rosso", "Blu", "Verde", "Giallo", "Arancione", "Viola", "Rosa", "Marrone", "Grigio", "Nero"]
     return f"{random.choice(nomi)}{random.choice(colori)}"
 
-def crea_utente(id_iscrizione, header, dati):
+def richiesta_wordpress_json(metodo, endpoint, header, operazione, dati=None):
+    url = f"{os.environ['WORDPRESS_URL'].rstrip('/')}{endpoint}"
+    kwargs = {"headers": header, "timeout": WORDPRESS_TIMEOUT}
+    if dati is not None:
+        kwargs["json"] = dati
+
     try:
-        response = requests.post(os.environ["WORDPRESS_URL"]+"/users", headers=header, json=dati)
-        id_autore = response.json()["id"]
-    except Exception as e:
-        print(e)
-        return False
-    session = Session()
-    utente = WordpressUser(data=str(datetime.now()), iscrizioni_id=int(id_iscrizione), wordpress_id=int(id_autore), username=dati["username"], password=dati["password"], meta=dati)
+        if metodo == "GET":
+            response = requests.get(url, **kwargs)
+        elif metodo == "POST":
+            response = requests.post(url, **kwargs)
+        else:
+            raise ValueError(f"Metodo HTTP non supportato: {metodo}")
+    except requests.Timeout as exc:
+        raise WordpressRequestError(
+            operazione, endpoint, "timeout HTTP"
+        ) from exc
+    except requests.ConnectionError as exc:
+        raise WordpressRequestError(
+            operazione, endpoint, "errore di connessione"
+        ) from exc
+    except requests.RequestException as exc:
+        raise WordpressRequestError(
+            operazione, endpoint, f"errore HTTP {type(exc).__name__}"
+        ) from exc
+
+    status_http = response.status_code
+    if not 200 <= status_http < 300:
+        codice_wordpress = None
+        try:
+            payload_errore = response.json()
+            if isinstance(payload_errore, dict):
+                codice_wordpress = payload_errore.get("code")
+        except (TypeError, ValueError):
+            pass
+        motivo = "risposta HTTP di errore"
+        if codice_wordpress:
+            motivo = f"{motivo} (codice WordPress: {codice_wordpress})"
+        raise WordpressRequestError(
+            operazione, endpoint, motivo, status_http=status_http
+        )
+
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        raise WordpressRequestError(
+            operazione,
+            endpoint,
+            "risposta JSON non valida",
+            status_http=status_http,
+        ) from exc
+    return payload, status_http
+
+
+def id_wordpress(payload, operazione, endpoint, status_http):
+    id_risorsa = payload.get("id") if isinstance(payload, dict) else None
+    if type(id_risorsa) is not int or id_risorsa <= 0:
+        raise WordpressRequestError(
+            operazione,
+            endpoint,
+            "risposta JSON inattesa: id assente o non numerico",
+            status_http=status_http,
+        )
+    return id_risorsa
+
+
+def crea_utente(session, id_iscrizione, header, dati):
+    endpoint = "/users"
+    payload, status_http = richiesta_wordpress_json(
+        "POST", endpoint, header, "creazione utente", dati=dati
+    )
+    id_autore = id_wordpress(
+        payload, "creazione utente", endpoint, status_http
+    )
+    utente = WordpressUser(data=datetime.now(), iscrizioni_id=int(id_iscrizione), wordpress_id=int(id_autore), username=dati["username"], password=dati["password"], meta=dati)
     session.add(utente)
     session.commit()
     return id_autore
 
-def crea_post(id_iscrizione, id_autore, header, dati, tipo):
-    try:
-        response = requests.post(os.environ["WORDPRESS_URL"]+"/posts", headers=header, json=dati)
-        id_post = response.json()["id"]
-    except:
-        return False
-    session = Session()
+def crea_post(session, id_iscrizione, id_autore, header, dati, tipo):
+    endpoint = "/posts"
+    payload, status_http = richiesta_wordpress_json(
+        "POST", endpoint, header, "creazione post", dati=dati
+    )
+    id_post = id_wordpress(payload, "creazione post", endpoint, status_http)
     utente = session.query(WordpressUser).filter_by(wordpress_id=int(id_autore)).first()
-    post = WordpressPost(data=str(datetime.now()), iscrizioni_id=int(id_iscrizione), wordpress_user_id=utente.id, wordpress_id=int(id_post), tipo=tipo, meta=dati)
+    post = WordpressPost(data=datetime.now(), iscrizioni_id=int(id_iscrizione), wordpress_user_id=utente.id, wordpress_id=int(id_post), tipo=tipo, meta=dati)
     session.add(post)
     session.commit()
     return id_post
@@ -372,6 +457,277 @@ def send_mail():
             sleep(1)
     threading.Thread(target=task, name="send_mail", daemon=True).start()
 
+def contesto_job_wordpress(tmp_job):
+    dati = tmp_job.dati if isinstance(tmp_job.dati, dict) else {}
+    return {
+        "job_id": tmp_job.id,
+        "iscrizione": dati.get("iscrizione"),
+        "username": dati.get("username"),
+        "regione": None,
+        "stato_iscrizione_errore": None,
+        "fase": "lettura job",
+    }
+
+
+def log_errore_wordpress(contesto, errore):
+    logger.error(
+        "JobWordpress fallito job_id=%s iscrizione=%s username=%s regione=%s "
+        "operazione=%s endpoint=%s status_http=%s motivo=%s",
+        contesto["job_id"],
+        contesto["iscrizione"],
+        contesto["username"],
+        contesto["regione"],
+        errore.operazione,
+        errore.endpoint,
+        errore.status_http,
+        errore.motivo,
+    )
+
+
+def marca_job_wordpress_fallito(session, contesto):
+    try:
+        tmp_job = session.get(JobWordpress, contesto["job_id"])
+        if tmp_job:
+            tmp_job.stato = "FAILED"
+        if contesto["iscrizione"] and contesto["stato_iscrizione_errore"]:
+            tmp_iscrizione = session.get(IscrizioneEG, contesto["iscrizione"])
+            if tmp_iscrizione:
+                tmp_iscrizione.stato = contesto["stato_iscrizione_errore"]
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error(
+            "Impossibile persistere il fallimento JobWordpress job_id=%s "
+            "iscrizione=%s username=%s regione=%s motivo=%s",
+            contesto["job_id"],
+            contesto["iscrizione"],
+            contesto["username"],
+            contesto["regione"],
+            type(exc).__name__,
+        )
+
+
+def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
+    if not isinstance(tmp_job.dati, dict):
+        raise ValueError("dati job non validi")
+
+    id_iscrizione = tmp_job.dati.get("iscrizione")
+    tmp_iscrizione = session.get(IscrizioneEG, id_iscrizione)
+    if not tmp_iscrizione:
+        raise ValueError("iscrizione non trovata")
+
+    contesto["regione"] = tmp_iscrizione.regione
+    contesto["stato_iscrizione_errore"] = "failed_user"
+    contesto["fase"] = "creazione utente"
+    tmp_iscrizione.stato = "in_abilitazione"
+    session.commit()
+
+    wordpress_user = session.query(WordpressUser).filter_by(
+        iscrizioni_id=id_iscrizione
+    ).first()
+    if wordpress_user:
+        id_autore = wordpress_user.wordpress_id
+        tmp_passwd = wordpress_user.password
+    else:
+        tmp_passwd = genera_password_sq()
+        dati_utente = {
+            "username": tmp_job.dati["username"],
+            "name": tmp_iscrizione.nome.capitalize(),
+            "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
+            "password": tmp_passwd,
+            "roles": ["author"],
+            "meta": tmp_job.dati["meta"],
+        }
+        id_autore = crea_utente(
+            session, id_iscrizione, header, dati_utente
+        )
+
+    contesto["stato_iscrizione_errore"] = "failed_post"
+    contesto["fase"] = "creazione post"
+    wordpress_post = session.query(WordpressPost).filter_by(
+        iscrizioni_id=id_iscrizione, tipo="posts"
+    ).first()
+    if wordpress_post:
+        id_post = wordpress_post.wordpress_id
+    else:
+        template_post = session.query(SysOption).filter_by(
+            key="TemplatePost"
+        ).first()
+        if not template_post:
+            raise ValueError("TemplatePost non configurato")
+
+        endpoint_template = f"/posts/{template_post.value}?context=edit"
+        payload_template, status_template = richiesta_wordpress_json(
+            "GET", endpoint_template, header, "lettura template post"
+        )
+        try:
+            tmp_content = payload_template["content"]["raw"]
+        except (KeyError, TypeError) as exc:
+            raise WordpressRequestError(
+                "lettura template post",
+                endpoint_template,
+                "risposta JSON inattesa: content.raw assente",
+                status_http=status_template,
+            ) from exc
+
+        endpoint_specialita = "/specialita?per_page=100"
+        specialita_wordpress, status_specialita = richiesta_wordpress_json(
+            "GET", endpoint_specialita, header, "lettura specialita"
+        )
+        if not isinstance(specialita_wordpress, list):
+            raise WordpressRequestError(
+                "lettura specialita",
+                endpoint_specialita,
+                "risposta JSON inattesa: elenco specialita non valido",
+                status_http=status_specialita,
+            )
+        tmp_specialita = {
+            voce.get("name"): voce.get("id")
+            for voce in specialita_wordpress
+            if isinstance(voce, dict)
+        }
+        id_specialita = tmp_specialita.get(tmp_iscrizione.specialita.title())
+        if not isinstance(id_specialita, int):
+            raise WordpressRequestError(
+                "lettura specialita",
+                endpoint_specialita,
+                "specialita richiesta non trovata",
+                status_http=status_specialita,
+            )
+
+        endpoint_categorie = "/categories?per_page=100"
+        categorie_wordpress, status_categorie = richiesta_wordpress_json(
+            "GET", endpoint_categorie, header, "lettura categorie"
+        )
+        if not isinstance(categorie_wordpress, list):
+            raise WordpressRequestError(
+                "lettura categorie",
+                endpoint_categorie,
+                "risposta JSON inattesa: elenco categorie non valido",
+                status_http=status_categorie,
+            )
+        id_categoria = next(
+            (
+                voce.get("id")
+                for voce in categorie_wordpress
+                if isinstance(voce, dict) and voce.get("name") == "Pagina unica"
+            ),
+            None,
+        )
+        if not isinstance(id_categoria, int):
+            raise WordpressRequestError(
+                "lettura categorie",
+                endpoint_categorie,
+                "categoria Pagina unica non trovata",
+                status_http=status_categorie,
+            )
+
+        dati_post = {
+            "author": int(id_autore),
+            "categories": [id_categoria],
+            "content": tmp_content,
+            "meta": tmp_job.dati["meta"],
+            "specialita": [id_specialita],
+            "title": f"{tmp_job.dati['meta']['squadriglia']}",
+            "status": "publish",
+        }
+        id_post = crea_post(
+            session, id_iscrizione, int(id_autore), header, dati_post, "posts"
+        )
+
+    endpoint_post = f"/posts/{id_post}"
+    payload_post, status_post = richiesta_wordpress_json(
+        "GET", endpoint_post, header, "lettura post creato"
+    )
+    link_post = payload_post.get("link") if isinstance(payload_post, dict) else None
+    if not isinstance(link_post, str) or not link_post:
+        raise WordpressRequestError(
+            "lettura post creato",
+            endpoint_post,
+            "risposta JSON inattesa: link assente",
+            status_http=status_post,
+        )
+
+    testo_mail_sq = f"Congratulazioni {tmp_iscrizione.nome},<br>ecco le credenziali per il Diario di Bordo Digitale, potete accedere <a href=\"https://guidonciniverdi.it/wp-login.php\" target=\"_blank\">cliccando qui</a> oppure scaricando la app.<br><a href=\"https://play.google.com/store/apps/details?id=org.wordpress.android\" target=\"_blank\">Clicca qui per scaricare la app per Android</a><br><a href=\"https://apps.apple.com/it/app/wordpress-website-builder/id335703880\" target=\"_blank\">Clicca qui per scaricare la app per iOS</a><br>Trovate maggiori info qui: <a href=\"https://guidonciniverdi.it/come-funziona/\" target=\"_blank\">guidonciniverdi.it/come-funziona/</a><br><h4><strong>Credenziali</strong></h4>Username: {tmp_job.dati['username']}<br>Password: {tmp_passwd}"
+    destinatari_mail = [tmp_iscrizione.mail]
+    copia_mail = [tmp_iscrizione.mail_capo1, tmp_iscrizione.mail_capo2]
+    regione_mail = tmp_iscrizione.regione
+
+    tmp_job.stato = "DONE"
+    tmp_iscrizione.link = link_post
+    tmp_iscrizione.stato = "abilitato"
+    session.commit()
+
+    try:
+        manda_mail(
+            destinatari_mail,
+            copia_mail,
+            "Credenziali Diario di Bordo!",
+            testo_mail_sq,
+            regione_mail,
+        )
+    except Exception as exc:
+        logger.error(
+            "Accodamento mail fallito job_id=%s iscrizione=%s username=%s "
+            "regione=%s motivo=%s",
+            contesto["job_id"],
+            contesto["iscrizione"],
+            contesto["username"],
+            contesto["regione"],
+            type(exc).__name__,
+        )
+
+
+def processa_prossimo_job_wordpress(header, session_factory=Session):
+    session = session_factory()
+    contesto = None
+    try:
+        tmp_job = (
+            session.query(JobWordpress)
+            .filter_by(stato="PENDING")
+            .order_by(JobWordpress.id)
+            .first()
+        )
+        if not tmp_job:
+            return False
+
+        contesto = contesto_job_wordpress(tmp_job)
+        tmp_job.stato = "SENDING"
+        session.commit()
+
+        if not isinstance(tmp_job.dati, dict) or tmp_job.dati.get("tipo") != "crea_sq":
+            raise ValueError("tipo job non supportato")
+        processa_job_crea_squadriglia(session, tmp_job, header, contesto)
+        return True
+    except WordpressRequestError as exc:
+        session.rollback()
+        log_errore_wordpress(contesto, exc)
+        marca_job_wordpress_fallito(session, contesto)
+        return True
+    except Exception as exc:
+        session.rollback()
+        if contesto:
+            logger.error(
+                "JobWordpress fallito job_id=%s iscrizione=%s username=%s "
+                "regione=%s operazione=%s motivo=eccezione inattesa %s",
+                contesto["job_id"],
+                contesto["iscrizione"],
+                contesto["username"],
+                contesto["regione"],
+                contesto["fase"],
+                type(exc).__name__,
+            )
+            marca_job_wordpress_fallito(session, contesto)
+        else:
+            logger.error(
+                "Lettura coda JobWordpress fallita motivo=%s",
+                type(exc).__name__,
+            )
+        return True
+    finally:
+        session.close()
+
+
 def job_wordpress():
     def task():
         scheduler = schedule.Scheduler()
@@ -379,88 +735,23 @@ def job_wordpress():
         token = base64.b64encode(creds.encode())
         header = {"Authorization": f"Basic {token.decode('utf-8')}"}
         session = Session()
-        tmp_iscrizioni = session.query(IscrizioneEG).filter_by(stato="in_abilitazione")
-        for i in tmp_iscrizioni:
-            i.stato = "da_abilitare"
-        tmp_jobs = session.query(JobWordpress).filter_by(stato="SENDING")
-        for i in tmp_jobs:
-            i.stato = "PENDING"
-        session.commit()
-        session.close()
-
-        def job():
-            session = Session()
-            tmp_job = session.query(JobWordpress).filter_by(stato="PENDING").first()
-            if tmp_job:
-                tmp_job.stato = "SENDING"
-                session.commit()
-                
-                if tmp_job.dati["tipo"] == "crea_sq":
-                    tmp_iscrizione = session.query(IscrizioneEG).filter_by(id=tmp_job.dati["iscrizione"]).first()
-                    tmp_iscrizione.stato = "in_abilitazione"
-                    session.commit()
-                    tmp_passwd = genera_password_sq()
-                    dati = {
-                    "username": tmp_job.dati["username"],
-                    "name": tmp_iscrizione.nome.capitalize(),
-                    "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
-                    "password": tmp_passwd,
-                    "roles": ["author"],
-                    "meta": tmp_job.dati["meta"]
-                    }
-
-                    id_autore = crea_utente(tmp_job.dati["iscrizione"], header, dati)
-                    if not id_autore:
-                        tmp_job.stato = "FAILED"
-                        tmp_iscrizione.stato = "failed_user"
-                    tmp_ok = True
-                    tmp_content = requests.get(f"{os.environ['WORDPRESS_URL']}/posts/{session.query(SysOption).filter_by(key='TemplatePost').first().value}?context=edit", headers=header, verify=False).json()["content"]["raw"]
-
-                    specialita_wordpress = requests.get(f"{os.environ['WORDPRESS_URL']}/specialita?per_page=100", headers=header, verify=False).json()
-                    tmp_specialita = {}
-                    for i in specialita_wordpress:
-                        tmp_specialita[i["name"]] = i["id"]
-                    categorie_wordpress = requests.get(f"{os.environ['WORDPRESS_URL']}/categories?per_page=100", headers=header, verify=False).json()
-                    tmp_id_categoria = 0
-                    for i in categorie_wordpress:
-                        if i["name"] == "Pagina unica":
-                            tmp_id_categoria = i["id"]
-
-                    dati = {
-                        "author": int(id_autore),
-                        "categories": [tmp_id_categoria],
-                        "content": tmp_content,
-                        "meta": tmp_job.dati["meta"],
-                        "specialita": [tmp_specialita[tmp_iscrizione.specialita.title()]],
-                        "title": f"{tmp_job.dati['meta']['squadriglia']}",
-                        "status": "publish"
-                        }
-                    id_post = crea_post(tmp_job.dati["iscrizione"], int(id_autore), header, dati, "posts")
-                    if not id_post:
-                        tmp_ok = False
-
-                    if not tmp_ok:
-                        try:
-                            testo_telegram = f"Squadriglia {tmp_iscrizione.nome}\n{tmp_iscrizione.gruppo} - {tmp_iscrizione.zona}\nNon tutti i post sono stati correttamente creati"
-                            manda_telegram(User.query.filter_by(username="egm").first().telegram_id, "Problema tecnico!!", testo_telegram)
-                            manda_telegram(User.query.filter_by(username="admin").first().telegram_id, "Problema tecnico!!", testo_telegram)
-                        except:
-                            print("Errore")
-                        tmp_job.stato = "FAILED"
-                        tmp_iscrizione.stato = "failed_post"
-                    else:
-                        tmp_job.stato = "DONE"
-                        tmp_iscrizione.link = requests.get(f"{os.environ['WORDPRESS_URL']}/posts/{str(id_post)}", headers=header).json()["link"]
-                        tmp_iscrizione.stato = "abilitato"
-
-                        testo_mail_sq = f"Congratulazioni {tmp_iscrizione.nome},<br>ecco le credenziali per il Diario di Bordo Digitale, potete accedere <a href=\"https://guidonciniverdi.it/wp-login.php\" target=\"_blank\">cliccando qui</a> oppure scaricando la app.<br><a href=\"https://play.google.com/store/apps/details?id=org.wordpress.android\" target=\"_blank\">Clicca qui per scaricare la app per Android</a><br><a href=\"https://apps.apple.com/it/app/wordpress-website-builder/id335703880\" target=\"_blank\">Clicca qui per scaricare la app per iOS</a><br>Trovate maggiori info qui: <a href=\"https://guidonciniverdi.it/come-funziona/\" target=\"_blank\">guidonciniverdi.it/come-funziona/</a><br><h4><strong>Credenziali</strong></h4>Username: {tmp_job.dati['username']}<br>Password: {tmp_passwd}"
-                        manda_mail([tmp_iscrizione.mail], [tmp_iscrizione.mail_capo1, tmp_iscrizione.mail_capo2], "Credenziali Diario di Bordo!", testo_mail_sq, tmp_iscrizione.regione)
-                    session.commit()
-
-                session.commit()
+        try:
+            tmp_jobs = session.query(JobWordpress).filter_by(stato="SENDING")
+            for tmp_job in tmp_jobs:
+                tmp_job.stato = "PENDING"
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.error(
+                "Ripristino JobWordpress SENDING fallito motivo=%s",
+                type(exc).__name__,
+            )
+        finally:
             session.close()
 
-        scheduler.every(10).seconds.do(job)
+        scheduler.every(10).seconds.do(
+            processa_prossimo_job_wordpress, header
+        )
 
         global demone_wordpress
         while demone_wordpress:
@@ -468,34 +759,39 @@ def job_wordpress():
             sleep(1)
     threading.Thread(target=task, name="job_wordpress", daemon=True).start()
 
-while True:
-    session = Session()
-    demoni = {d.key: d.value for d in session.query(Demone).all()}
-    session.close()
-    demone_mail = demoni["send_mail"]
-    demone_telegram = demoni["send_telegram"]
-    demone_notifiche = demoni["send_notifiche"]
-    demone_wordpress = demoni["job_wordpress"]
-    session.close()
-    mail_seen = False
-    telegram_seen = False
-    notifiche_seen = False
-    wordpress_seen = False
-    for i in threading.enumerate():
-        if i.name == "send_mail":
-            mail_seen = True
-        if i.name == "send_telegram":
-            telegram_seen = True
-        if i.name == "send_notifiche":
-            notifiche_seen = True
-        if i.name == "job_wordpress":
-            wordpress_seen = True
-    if demone_mail and not mail_seen:
-        send_mail()
-    if demone_telegram and not telegram_seen:
-        send_telegram()
-    if demone_notifiche and not notifiche_seen:
-        send_notifiche()
-    if demone_wordpress and not wordpress_seen:
-        job_wordpress()
-    sleep(30)
+def main():
+    global demone_mail, demone_telegram, demone_notifiche, demone_wordpress
+    while True:
+        session = Session()
+        demoni = {d.key: d.value for d in session.query(Demone).all()}
+        session.close()
+        demone_mail = demoni["send_mail"]
+        demone_telegram = demoni["send_telegram"]
+        demone_notifiche = demoni["send_notifiche"]
+        demone_wordpress = demoni["job_wordpress"]
+        mail_seen = False
+        telegram_seen = False
+        notifiche_seen = False
+        wordpress_seen = False
+        for thread in threading.enumerate():
+            if thread.name == "send_mail":
+                mail_seen = True
+            if thread.name == "send_telegram":
+                telegram_seen = True
+            if thread.name == "send_notifiche":
+                notifiche_seen = True
+            if thread.name == "job_wordpress":
+                wordpress_seen = True
+        if demone_mail and not mail_seen:
+            send_mail()
+        if demone_telegram and not telegram_seen:
+            send_telegram()
+        if demone_notifiche and not notifiche_seen:
+            send_notifiche()
+        if demone_wordpress and not wordpress_seen:
+            job_wordpress()
+        sleep(30)
+
+
+if __name__ == "__main__":
+    main()

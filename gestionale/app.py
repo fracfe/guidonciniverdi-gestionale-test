@@ -170,6 +170,45 @@ class JobWordpress(db.Model):
     stato = db.Column(db.String(255), nullable=False)
     dati = db.Column(db.JSON, nullable=False)
 
+
+def accoda_creazione_squadriglia(iscrizione_id, username, meta):
+    """Accoda una sola creazione WordPress attiva per iscrizione."""
+    iscrizione_acquisita = (
+        db.session.query(IscrizioneEG)
+        .filter(
+            IscrizioneEG.id == iscrizione_id,
+            IscrizioneEG.stato.in_(["da_abilitare", "failed_user"]),
+        )
+        .update(
+            {IscrizioneEG.stato: "in_abilitazione"},
+            synchronize_session=False,
+        )
+    )
+    if not iscrizione_acquisita:
+        return False
+
+    job_attivo = any(
+        job.dati.get("tipo") == "crea_sq"
+        and job.dati.get("iscrizione") == iscrizione_id
+        for job in JobWordpress.query.filter(
+            JobWordpress.stato.in_(["PENDING", "SENDING"])
+        )
+    )
+    if not job_attivo:
+        db.session.add(
+            JobWordpress(
+                data=datetime.now(),
+                stato="PENDING",
+                dati={
+                    "iscrizione": iscrizione_id,
+                    "tipo": "crea_sq",
+                    "username": username,
+                    "meta": meta,
+                },
+            )
+        )
+    return not job_attivo
+
 class StatusPercorso(db.Model):
     __tablename__ = "status_percorso"
     id = db.Column(db.Integer, primary_key=True)
@@ -593,8 +632,7 @@ def abilita(id_iscrizione):
             "zona": tmp_zona.zona.removeprefix("ZONA ").title()
             }
 
-        if tmp_iscrizione.stato == "da_abilitare":
-            db.session.add(JobWordpress(data=str(datetime.now()), stato="PENDING", dati={"iscrizione": tmp_iscrizione.id, "tipo": "crea_sq", "username": tmp_username, "meta": tmp_meta}))
+        accoda_creazione_squadriglia(tmp_iscrizione.id, tmp_username, tmp_meta)
         db.session.commit()
         return redirect(url_for("iscrizioni"))
     return render_template("abilita.html", iscrizione=tmp_iscrizione, gruppo=tmp_gruppo, zona=tmp_zona, username=tmp_username, valid_username=valid_username)
