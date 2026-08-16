@@ -401,12 +401,13 @@ def job_wordpress():
                     session.commit()
                     tmp_passwd = genera_password_sq()
                     dati = {
-                        "username": tmp_job.dati["username"],
-                        "name": tmp_iscrizione.nome.capitalize(),
-                        "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
-                        "password": tmp_passwd,
-                        "meta": tmp_job.dati["meta"]
-                        }
+                    "username": tmp_job.dati["username"],
+                    "name": tmp_iscrizione.nome.capitalize(),
+                    "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
+                    "password": tmp_passwd,
+                    "roles": ["author"],
+                    "meta": tmp_job.dati["meta"]
+                    }
 
                     id_autore = crea_utente(tmp_job.dati["iscrizione"], header, dati)
                     if not id_autore:
