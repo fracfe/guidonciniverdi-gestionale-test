@@ -1,0 +1,126 @@
+name: gv-test
+
+services:
+  gestionale-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: ${GV_DB_NAME}
+      MARIADB_USER: ${GV_DB_USER}
+      MARIADB_PASSWORD: ${GV_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${GV_DB_ROOT_PASSWORD}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - gestionale-db-data:/var/lib/mysql
+    networks: [gv-test]
+
+  gestionale:
+    build:
+      context: ../..
+      dockerfile: gestionale/Dockerfile
+    environment:
+      DB_TYPE: mariadb
+      DB_HOST: gestionale-db
+      DB_PORT: 3306
+      DB_NAME: ${GV_DB_NAME}
+      DB_USER: ${GV_DB_USER}
+      DB_PASSWORD: ${GV_DB_PASSWORD}
+      SECRET_KEY: ${GV_SECRET_KEY}
+      WORDPRESS_URL: http://wordpress/wp-json/wp/v2
+      WORDPRESS_USER: ${WP_API_USER}
+      WORDPRESS_PASSWORD: ${WP_API_PASSWORD}
+    depends_on:
+      gestionale-db:
+        condition: service_healthy
+    ports:
+      - "${GESTIONALE_PORT:-5000}:8000"
+    networks: [gv-test]
+
+  wordpress-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: ${WP_DB_NAME}
+      MARIADB_USER: ${WP_DB_USER}
+      MARIADB_PASSWORD: ${WP_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${WP_DB_ROOT_PASSWORD}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MARIADB_ROOT_PASSWORD}"
+          healthcheck.sh --no-defaults --connect --innodb_initialized
+      start_period: 30s
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - wordpress-db-data:/var/lib/mysql
+    networks: [gv-test]
+
+  wordpress:
+    image: wordpress:php8.3-apache
+    environment:
+      WORDPRESS_DB_HOST: wordpress-db:3306
+      WORDPRESS_DB_NAME: ${WP_DB_NAME}
+      WORDPRESS_DB_USER: ${WP_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WP_DB_PASSWORD}
+      WORDPRESS_DEBUG: "1"
+      WP_ENVIRONMENT_TYPE: local
+    depends_on:
+      wordpress-db:
+        condition: service_healthy
+    ports:
+      - "${WORDPRESS_PORT:-8080}:80"
+    volumes:
+      - wordpress-data:/var/www/html
+      - ${WORDPRESS_SOURCE_DIR}/themes/guidonciniverdi:/var/www/html/wp-content/themes/guidonciniverdi
+      - ${WORDPRESS_SOURCE_DIR}/plugins/guidonciniverdi:/var/www/html/wp-content/plugins/guidonciniverdi
+      - ${WORDPRESS_SOURCE_DIR}/plugins/guidonciniverdi-blocks:/var/www/html/wp-content/plugins/guidonciniverdi-blocks
+    networks: [gv-test]
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "${MAILPIT_HTTP_PORT:-8025}:8025"
+    networks: [gv-test]
+
+  gestionale-daemon:
+    profiles: [integration]
+    build:
+      context: ../..
+      dockerfile: gestionale-daemon/Dockerfile
+    environment:
+      DB_TYPE: mariadb
+      DB_HOST: gestionale-db
+      DB_PORT: 3306
+      DB_NAME: ${GV_DB_NAME}
+      DB_USER: ${GV_DB_USER}
+      DB_PASSWORD: ${GV_DB_PASSWORD}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      WORDPRESS_URL: http://wordpress/wp-json/wp/v2
+      WORDPRESS_USER: ${WP_API_USER}
+      WORDPRESS_PASSWORD: ${WP_API_PASSWORD}
+      TELEGRAM_ENABLED: "false"
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+    depends_on:
+      gestionale-db:
+        condition: service_healthy
+      wordpress:
+        condition: service_started
+      mailpit:
+        condition: service_started
+    networks: [gv-test]
+
+networks:
+  gv-test:
+    name: gv-test
+
+volumes:
+  gestionale-db-data:
+  wordpress-db-data:
+  wordpress-data:

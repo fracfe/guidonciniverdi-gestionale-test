@@ -22,15 +22,22 @@ logger = logging.getLogger("guidonciniverdi.daemon.wordpress")
 WORDPRESS_TIMEOUT = (5, 30)
 JOB_STALE_AFTER = timedelta(minutes=15)
 JOB_MAX_ATTEMPTS = 3
+MAIL_SMTP_TIMEOUT = 10
+TELEGRAM_ENABLED = os.environ.get("TELEGRAM_ENABLED", "true").lower() in {
+    "1", "true", "yes", "on"
+}
 
 
 class WordpressRequestError(Exception):
-    def __init__(self, operazione, endpoint, motivo, status_http=None):
+    def __init__(
+        self, operazione, endpoint, motivo, status_http=None, risorsa=None
+    ):
         super().__init__(motivo)
         self.operazione = operazione
         self.endpoint = endpoint
         self.motivo = motivo
         self.status_http = status_http
+        self.risorsa = risorsa
 
 specialita = [
     "Alpinismo",
@@ -237,21 +244,36 @@ demone_telegram = True
 demone_notifiche = True
 demone_wordpress = True
 
+def accoda_mail_sessione(
+    session, indirizzi, copia, titolo, testo, regione, anno=None
+):
+    anno_mail = anno
+    if not anno_mail:
+        opzione_anno = session.query(SysOption).filter_by(
+            key="AnnoCorrente"
+        ).first()
+        if not opzione_anno:
+            raise ValueError("AnnoCorrente non configurato")
+        anno_mail = opzione_anno.value
+    mail = CodaMail(
+        data=datetime.now(),
+        stato="PENDING",
+        regione=regione,
+        indirizzi=indirizzi,
+        indirizzi_copia=copia,
+        titolo=f"Guidoncini Verdi {anno_mail} - {titolo}",
+        testo=testo,
+    )
+    session.add(mail)
+    return mail
+
+
 def manda_mail(indirizzi, copia, titolo, testo, regione, anno=None):
     session = Session()
     try:
-        anno_mail = anno or session.query(SysOption).filter_by(
-            key="AnnoCorrente"
-        ).first().value
-        session.add(CodaMail(
-            data=datetime.now(),
-            stato="PENDING",
-            regione=regione,
-            indirizzi=indirizzi,
-            indirizzi_copia=copia,
-            titolo=f"Guidoncini Verdi {anno_mail} - {titolo}",
-            testo=testo,
-        ))
+        accoda_mail_sessione(
+            session, indirizzi, copia, titolo, testo, regione, anno=anno
+        )
         session.commit()
         return True
     except Exception:
@@ -271,8 +293,10 @@ def genera_password_sq():
     colori = ["Rosso", "Blu", "Verde", "Giallo", "Arancione", "Viola", "Rosa", "Marrone", "Grigio", "Nero"]
     return f"{random.choice(nomi)}{random.choice(colori)}"
 
-def richiesta_wordpress_json(metodo, endpoint, header, operazione, dati=None):
-    url = f"{os.environ['WORDPRESS_URL'].rstrip('/')}{endpoint}"
+def richiesta_wordpress_json(
+    metodo, endpoint, header, operazione, dati=None, base_url=None
+):
+    url = f"{(base_url or os.environ['WORDPRESS_URL']).rstrip('/')}{endpoint}"
     kwargs = {"headers": header, "timeout": WORDPRESS_TIMEOUT}
     if dati is not None:
         kwargs["json"] = dati
@@ -300,17 +324,25 @@ def richiesta_wordpress_json(metodo, endpoint, header, operazione, dati=None):
     status_http = response.status_code
     if not 200 <= status_http < 300:
         codice_wordpress = None
+        risorsa = None
         try:
             payload_errore = response.json()
             if isinstance(payload_errore, dict):
                 codice_wordpress = payload_errore.get("code")
+                dati_errore = payload_errore.get("data")
+                if isinstance(dati_errore, dict):
+                    risorsa = dati_errore.get("resource")
         except (TypeError, ValueError):
             pass
         motivo = "risposta HTTP di errore"
         if codice_wordpress:
             motivo = f"{motivo} (codice WordPress: {codice_wordpress})"
         raise WordpressRequestError(
-            operazione, endpoint, motivo, status_http=status_http
+            operazione,
+            endpoint,
+            motivo,
+            status_http=status_http,
+            risorsa=risorsa,
         )
 
     try:
@@ -323,6 +355,69 @@ def richiesta_wordpress_json(metodo, endpoint, header, operazione, dati=None):
             status_http=status_http,
         ) from exc
     return payload, status_http
+
+
+def wordpress_rest_root():
+    wordpress_url = os.environ["WORDPRESS_URL"].rstrip("/")
+    namespace_core = "/wp/v2"
+    if not wordpress_url.endswith(namespace_core):
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            "/guidonciniverdi/v1/provisioning",
+            "configurazione WORDPRESS_URL non compatibile con la REST API wp/v2",
+        )
+    return wordpress_url[:-len(namespace_core)]
+
+
+def lookup_provisioning_wordpress(id_iscrizione, header):
+    endpoint = f"/guidonciniverdi/v1/provisioning/{int(id_iscrizione)}"
+    payload, status_http = richiesta_wordpress_json(
+        "GET",
+        endpoint,
+        header,
+        "riconciliazione provisioning",
+        base_url=wordpress_rest_root(),
+    )
+    if not isinstance(payload, dict) or set(payload) != {"user", "post"}:
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            endpoint,
+            "risposta JSON inattesa: struttura provisioning non valida",
+            status_http=status_http,
+        )
+
+    user = payload["user"]
+    if user is not None and (
+        not isinstance(user, dict)
+        or type(user.get("id")) is not int
+        or user["id"] <= 0
+        or not isinstance(user.get("username"), str)
+        or not user["username"]
+    ):
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            endpoint,
+            "risposta JSON inattesa: utente non valido",
+            status_http=status_http,
+        )
+
+    post = payload["post"]
+    if post is not None and (
+        not isinstance(post, dict)
+        or type(post.get("id")) is not int
+        or post["id"] <= 0
+        or type(post.get("author")) is not int
+        or post["author"] <= 0
+        or not isinstance(post.get("link"), str)
+        or not post["link"]
+    ):
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            endpoint,
+            "risposta JSON inattesa: post non valido",
+            status_http=status_http,
+        )
+    return payload
 
 
 def id_wordpress(payload, operazione, endpoint, status_http):
@@ -350,6 +445,20 @@ def crea_utente(session, id_iscrizione, header, dati):
     session.commit()
     return id_autore
 
+
+def adotta_utente(session, id_iscrizione, id_autore, username, password, meta):
+    utente = WordpressUser(
+        data=datetime.now(),
+        iscrizioni_id=int(id_iscrizione),
+        wordpress_id=int(id_autore),
+        username=username,
+        password=password,
+        meta=meta,
+    )
+    session.add(utente)
+    session.commit()
+
+
 def crea_post(session, id_iscrizione, id_autore, header, dati, tipo):
     endpoint = "/posts"
     payload, status_http = richiesta_wordpress_json(
@@ -361,6 +470,25 @@ def crea_post(session, id_iscrizione, id_autore, header, dati, tipo):
     session.add(post)
     session.commit()
     return id_post
+
+
+def adotta_post(session, id_iscrizione, id_autore, id_post, tipo):
+    utente = session.query(WordpressUser).filter_by(
+        wordpress_id=int(id_autore)
+    ).one()
+    post = WordpressPost(
+        data=datetime.now(),
+        iscrizioni_id=int(id_iscrizione),
+        wordpress_user_id=utente.id,
+        wordpress_id=int(id_post),
+        tipo=tipo,
+        meta={
+            "author": int(id_autore),
+            "meta": {"gv_iscrizione_id": int(id_iscrizione)},
+        },
+    )
+    session.add(post)
+    session.commit()
 
 def send_notifiche():
     def task():
@@ -426,56 +554,132 @@ def send_telegram():
             sleep(1)
     threading.Thread(target=task, name="send_telegram", daemon=True).start()
 
+def errore_smtp_temporaneo(exc):
+    if isinstance(exc, (TimeoutError, OSError, smtplib.SMTPServerDisconnected)):
+        return True
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        codici = [risposta[0] for risposta in exc.recipients.values()]
+        return bool(codici) and all(400 <= codice < 500 for codice in codici)
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return 400 <= exc.smtp_code < 500
+    return False
+
+
+def recupera_mail_invio_interrotto(session_factory=Session):
+    session = session_factory()
+    try:
+        recuperate = session.query(CodaMail).filter_by(stato="SENDING").update(
+            {CodaMail.stato: "PENDING"}, synchronize_session=False
+        )
+        session.commit()
+        if recuperate:
+            logger.warning("Mail SENDING riportate in coda numero=%s", recuperate)
+        return recuperate
+    except Exception as exc:
+        session.rollback()
+        logger.error(
+            "Recovery coda mail fallita motivo=%s", type(exc).__name__
+        )
+        return 0
+    finally:
+        session.close()
+
+
+def processa_prossima_mail(
+    template, session_factory=Session, smtp_factory=smtplib.SMTP
+):
+    session = session_factory()
+    tmp_mail = None
+    try:
+        tmp_mail = (
+            session.query(CodaMail)
+            .filter_by(stato="PENDING")
+            .order_by(CodaMail.id)
+            .first()
+        )
+        if not tmp_mail:
+            return False
+        tmp_mail.stato = "SENDING"
+        session.commit()
+
+        tmp_regione = session.get(Regione, tmp_mail.regione)
+        opzione_anno = session.get(SysOption, "AnnoCorrente")
+        if not tmp_regione or not opzione_anno:
+            raise ValueError("configurazione mail locale incompleta")
+        anno = opzione_anno.value
+        html = template.render(
+            anno=anno,
+            titolo=tmp_mail.titolo,
+            testo=tmp_mail.testo,
+            mail_regione=tmp_regione.mail,
+        )
+        indirizzi = list(tmp_mail.indirizzi or [])
+        message = MIMEMultipart("alternative")
+        message["Subject"] = f"Guidoncini Verdi {anno} - {tmp_mail.titolo}"
+        message["From"] = sender_address
+        message["Reply-To"] = tmp_regione.mail
+        message["To"] = ", ".join(tmp_mail.indirizzi or [])
+        if tmp_mail.indirizzi_copia:
+            message["Cc"] = ", ".join(tmp_mail.indirizzi_copia)
+            indirizzi.extend(tmp_mail.indirizzi_copia)
+        indirizzi = [indirizzo for indirizzo in indirizzi if indirizzo]
+        message.attach(MIMEText(f"{tmp_mail.titolo}\n{tmp_mail.testo}", "plain"))
+        message.attach(MIMEText(html, "html"))
+
+        with smtp_factory(
+            smtp_host, int(smtp_port), timeout=MAIL_SMTP_TIMEOUT
+        ) as server:
+            rifiutati = server.sendmail(
+                sender_address, indirizzi, message.as_string()
+            )
+        inviati = len(indirizzi) - len(rifiutati)
+        if rifiutati:
+            logger.warning(
+                "Mail parzialmente rifiutata mail_id=%s rifiutati=%s totali=%s",
+                tmp_mail.id,
+                len(rifiutati),
+                len(indirizzi),
+            )
+        rifiuti_temporanei = bool(rifiutati) and all(
+            400 <= risposta[0] < 500 for risposta in rifiutati.values()
+        )
+        if not rifiutati:
+            tmp_mail.stato = "SENT"
+        elif inviati == 0 and rifiuti_temporanei:
+            tmp_mail.stato = "PENDING"
+        else:
+            tmp_mail.stato = "FAILED"
+        session.commit()
+        return True
+    except Exception as exc:
+        session.rollback()
+        if tmp_mail:
+            tmp_mail = session.get(CodaMail, tmp_mail.id)
+            if tmp_mail:
+                tmp_mail.stato = (
+                    "PENDING" if errore_smtp_temporaneo(exc) else "FAILED"
+                )
+                session.commit()
+        logger.error(
+            "Invio mail fallito mail_id=%s ritentabile=%s motivo=%s",
+            getattr(tmp_mail, "id", None),
+            errore_smtp_temporaneo(exc),
+            type(exc).__name__,
+        )
+        return True
+    finally:
+        session.close()
+
+
 def send_mail():
     def task():
         env = Environment(loader=FileSystemLoader("."))
         template = env.get_template("mail_base.html")
         scheduler = schedule.Scheduler()
+        recupera_mail_invio_interrotto()
+
         def job():
-            session = Session()
-            tmp_mail = session.query(CodaMail).filter_by(stato="PENDING").first()
-            if tmp_mail:
-                tmp_mail.stato = "SENDING"
-                session.commit()
-                try:
-                    tmp_regione = session.query(Regione).filter_by(id=tmp_mail.regione).first()
-                    anno = session.query(SysOption).filter_by(key="AnnoCorrente").first().value
-                    html = template.render(anno=anno, titolo=tmp_mail.titolo, testo=tmp_mail.testo, mail_regione=tmp_regione.mail)
-                    indirizzi = tmp_mail.indirizzi.copy()
-                    message = MIMEMultipart("alternative")
-                    message["Subject"] = f"Guidoncini Verdi {anno} - {tmp_mail.titolo}"
-                    message["From"] = sender_address
-                    message["Reply-To"] = tmp_regione.mail
-                    message["To"] = ", ".join(tmp_mail.indirizzi)
-                    if tmp_mail.indirizzi_copia:
-                        message["Cc"] = ", ".join(tmp_mail.indirizzi_copia)
-                        indirizzi.extend(tmp_mail.indirizzi_copia)
-                        indirizzi = [x for x in indirizzi if x != ""]
-
-                    text = f"{tmp_mail.titolo}\n{tmp_mail.testo}"
-                    part1 = MIMEText(text, "plain")
-                    part2 = MIMEText(html, "html")
-                    message.attach(part1)
-                    message.attach(part2)
-
-                    with smtplib.SMTP(smtp_host, smtp_port) as server:
-                        response = server.sendmail(sender_address, indirizzi, message.as_string())
-                    
-                    refused_count = len(response)
-                    sent_count = len(indirizzi) - refused_count
-                    if refused_count:
-                        print(f"Mail {tmp_mail.id}: destinatari rifiutati dal server SMTP: {response}")
-
-                    if sent_count > 0:
-                        tmp_mail.stato = "SENT"
-                    else:
-                        tmp_mail.stato = "FAILED"
-
-                except Exception as e:
-                    print(e)
-                    tmp_mail.stato = "FAILED"
-                session.commit()
-            session.close()
+            processa_prossima_mail(template)
 
         scheduler.every(10).seconds.do(job)
 
@@ -552,12 +756,104 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
     tmp_iscrizione.stato = "in_abilitazione"
     session.commit()
 
+    meta_provisioning = dict(tmp_job.dati["meta"])
+    meta_provisioning["gv_iscrizione_id"] = int(id_iscrizione)
+    try:
+        provisioning = lookup_provisioning_wordpress(id_iscrizione, header)
+    except WordpressRequestError as exc:
+        if exc.risorsa == "post":
+            contesto["stato_iscrizione_errore"] = "failed_post"
+            contesto["fase"] = "riconciliazione post"
+        raise
+
     wordpress_user = session.query(WordpressUser).filter_by(
         iscrizioni_id=id_iscrizione
     ).first()
+    remote_user = provisioning["user"]
+    remote_post = provisioning["post"]
+
+    if remote_user and remote_user["username"] != tmp_job.dati["username"]:
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "conflitto: username remoto diverso da quello dell'iscrizione",
+        )
+    if remote_user and remote_post and remote_post["author"] != remote_user["id"]:
+        contesto["stato_iscrizione_errore"] = "failed_post"
+        contesto["fase"] = "riconciliazione post"
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "conflitto: autore del post non coerente con l'utente remoto",
+        )
+    if not wordpress_user and remote_post and not remote_user:
+        contesto["stato_iscrizione_errore"] = "failed_post"
+        contesto["fase"] = "riconciliazione post"
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "conflitto: post remoto presente senza utente riconciliabile",
+        )
+
     if wordpress_user:
         id_autore = wordpress_user.wordpress_id
         tmp_passwd = wordpress_user.password
+        if remote_user and (
+            remote_user["id"] != id_autore
+            or remote_user["username"] != wordpress_user.username
+        ):
+            raise WordpressRequestError(
+                "riconciliazione provisioning",
+                f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+                "conflitto: utente remoto diverso dal mirror locale",
+            )
+        if remote_post and remote_post["author"] != id_autore:
+            contesto["stato_iscrizione_errore"] = "failed_post"
+            contesto["fase"] = "riconciliazione post"
+            raise WordpressRequestError(
+                "riconciliazione provisioning",
+                f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+                "conflitto: autore del post diverso dal mirror utente locale",
+            )
+    elif remote_user:
+        id_autore = remote_user["id"]
+        tmp_passwd = genera_password_sq()
+        endpoint_utente = f"/users/{id_autore}"
+        payload_utente, status_utente = richiesta_wordpress_json(
+            "POST",
+            endpoint_utente,
+            header,
+            "ripristino password utente riconciliato",
+            dati={"password": tmp_passwd},
+        )
+        if id_wordpress(
+            payload_utente,
+            "ripristino password utente riconciliato",
+            endpoint_utente,
+            status_utente,
+        ) != id_autore:
+            raise WordpressRequestError(
+                "ripristino password utente riconciliato",
+                endpoint_utente,
+                "risposta JSON inattesa: id utente non coerente",
+                status_http=status_utente,
+            )
+        dati_utente = {
+            "username": tmp_job.dati["username"],
+            "name": tmp_iscrizione.nome.capitalize(),
+            "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
+            "password": tmp_passwd,
+            "roles": ["author"],
+            "meta": meta_provisioning,
+        }
+        adotta_utente(
+            session,
+            id_iscrizione,
+            id_autore,
+            tmp_job.dati["username"],
+            tmp_passwd,
+            dati_utente,
+        )
     else:
         tmp_passwd = genera_password_sq()
         dati_utente = {
@@ -566,7 +862,7 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
             "email": f"{tmp_job.dati['username']}@guidonciniverdi.it",
             "password": tmp_passwd,
             "roles": ["author"],
-            "meta": tmp_job.dati["meta"],
+            "meta": meta_provisioning,
         }
         id_autore = crea_utente(
             session, id_iscrizione, header, dati_utente
@@ -574,11 +870,45 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
 
     contesto["stato_iscrizione_errore"] = "failed_post"
     contesto["fase"] = "creazione post"
+    provisioning = lookup_provisioning_wordpress(id_iscrizione, header)
+    remote_user = provisioning["user"]
+    remote_post = provisioning["post"]
+    if not remote_user:
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "utente remoto con meta stabile non trovato prima della creazione post",
+        )
+    if (
+        remote_user["id"] != id_autore
+        or remote_user["username"] != tmp_job.dati["username"]
+    ):
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "conflitto: utente remoto non coerente prima della creazione post",
+        )
+    if remote_post and remote_post["author"] != id_autore:
+        raise WordpressRequestError(
+            "riconciliazione provisioning",
+            f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+            "conflitto: autore del post remoto non coerente",
+        )
+
     wordpress_post = session.query(WordpressPost).filter_by(
         iscrizioni_id=id_iscrizione, tipo="posts"
     ).first()
     if wordpress_post:
         id_post = wordpress_post.wordpress_id
+        if remote_post and remote_post["id"] != id_post:
+            raise WordpressRequestError(
+                "riconciliazione provisioning",
+                f"/guidonciniverdi/v1/provisioning/{id_iscrizione}",
+                "conflitto: post remoto diverso dal mirror locale",
+            )
+    elif remote_post:
+        id_post = remote_post["id"]
+        adotta_post(session, id_iscrizione, id_autore, id_post, "posts")
     else:
         template_post = session.query(SysOption).filter_by(
             key="TemplatePost"
@@ -656,7 +986,7 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
             "author": int(id_autore),
             "categories": [id_categoria],
             "content": tmp_content,
-            "meta": tmp_job.dati["meta"],
+            "meta": meta_provisioning,
             "specialita": [id_specialita],
             "title": f"{tmp_job.dati['meta']['squadriglia']}",
             "status": "publish",
@@ -828,38 +1158,30 @@ def processa_job_update_squadriglia(session, tmp_job, header, contesto):
     dati_post_locali = dict(wordpress_post.meta or {})
     dati_post_locali.update(dati_post)
     wordpress_post.meta = dati_post_locali
+    regione = session.get(Regione, iscrizione.regione)
+    percorso = session.get(StatusPercorso, iscrizione.anno_percorso)
+    riepilogo = genera_mail_riepilogo_iscrizione(
+        iscrizione,
+        regione,
+        zona,
+        gruppo,
+        percorso,
+        wordpress_user=wordpress_user,
+        operazione="modifica",
+    )
+    accoda_mail_sessione(
+        session,
+        riepilogo["destinatari"],
+        riepilogo["copia"],
+        riepilogo["oggetto"],
+        riepilogo["html"],
+        iscrizione.regione,
+        anno=riepilogo["anno"],
+    )
     tmp_job.stato = "DONE"
     tmp_job.updated_at = datetime.now()
     tmp_job.last_error = None
     session.commit()
-
-    try:
-        regione = session.get(Regione, iscrizione.regione)
-        percorso = session.get(StatusPercorso, iscrizione.anno_percorso)
-        riepilogo = genera_mail_riepilogo_iscrizione(
-            iscrizione,
-            regione,
-            zona,
-            gruppo,
-            percorso,
-            wordpress_user=wordpress_user,
-            operazione="modifica",
-        )
-        manda_mail(
-            riepilogo["destinatari"],
-            riepilogo["copia"],
-            riepilogo["oggetto"],
-            riepilogo["html"],
-            iscrizione.regione,
-            anno=riepilogo["anno"],
-        )
-    except Exception as exc:
-        logger.error(
-            "Accodamento mail aggiornamento fallito job_id=%s iscrizione=%s "
-            "username=%s regione=%s motivo=%s",
-            contesto["job_id"], contesto["iscrizione"], contesto["username"],
-            contesto["regione"], type(exc).__name__,
-        )
 
 
 def processa_prossimo_job_wordpress(header, session_factory=Session):
@@ -935,8 +1257,10 @@ def recupera_job_wordpress_stale(session_factory=Session, adesso=None):
             JobWordpress.updated_at < soglia,
         ).all()
         for job in stale:
+            tentativi_precedenti = job.attempts or 0
+            job.attempts = tentativi_precedenti + 1
             job.updated_at = adesso
-            if (job.attempts or 0) < JOB_MAX_ATTEMPTS:
+            if tentativi_precedenti < JOB_MAX_ATTEMPTS:
                 job.stato = "PENDING"
                 job.started_at = None
                 job.last_error = "Job stale recuperato e riportato in coda"
@@ -1010,7 +1334,7 @@ def main():
         demoni = {d.key: d.value for d in session.query(Demone).all()}
         session.close()
         demone_mail = demoni["send_mail"]
-        demone_telegram = demoni["send_telegram"]
+        demone_telegram = demoni["send_telegram"] and TELEGRAM_ENABLED
         demone_notifiche = demoni["send_notifiche"]
         demone_wordpress = demoni["job_wordpress"]
         mail_seen = False

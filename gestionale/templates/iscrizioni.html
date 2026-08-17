@@ -127,7 +127,7 @@
           <td>{{ i[0]["nome"] }}</td>
           <td>{{ i[0]["specialita"] }}</td>
           <td>{{ i[0]["tipo"].capitalize() }}</td>
-          <td>{{ badge_stato_iscrizione(i[0]["stato"], true) }}</td>
+          <td>{{ badge_stato_iscrizione(i[0]["stato"], true, classificazioni_orfani.get(i[0]["id"], false)) }}</td>
           <td><a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a></td>
         </tr>
         {% endif %}

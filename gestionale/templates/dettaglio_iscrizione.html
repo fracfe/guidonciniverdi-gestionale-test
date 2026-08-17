@@ -21,8 +21,8 @@
   <section class="card mb-3" aria-labelledby="titolo-stato-iscrizione">
     <div class="card-body">
       <h2 class="h4" id="titolo-stato-iscrizione">Stato iscrizione</h2>
-      {{ badge_stato_iscrizione(iscrizione.stato, true) }}
-      {% if iscrizione.stato == "in_abilitazione" %}
+      {{ badge_stato_iscrizione(iscrizione.stato, true, sync_wordpress.get("classificazione", false)) }}
+      {% if iscrizione.stato == "in_abilitazione" and sync_wordpress.codice == "processing" %}
       <p class="mb-0 mt-2">La richiesta è stata presa in carico e il sistema sta lavorando in background.</p>
       {% endif %}
     </div>
@@ -36,7 +36,8 @@
         <dd class="col-sm-8">
           {% if sync_wordpress.codice == "done" %}<span class="badge bg-success">{{ sync_wordpress.testo }}</span>
           {% elif sync_wordpress.codice == "processing" %}<span class="badge bg-info text-dark">{{ sync_wordpress.testo }}</span>
-          {% elif sync_wordpress.codice == "failed" %}<span class="badge bg-danger">{{ sync_wordpress.testo }}</span>
+          {% elif sync_wordpress.codice in ["failed", "orphaned_vuoto", "orphaned_ambiguo"] %}<span class="badge bg-danger">{{ sync_wordpress.testo }}</span>
+          {% elif sync_wordpress.codice == "orphaned_completo" %}<span class="badge bg-success">{{ sync_wordpress.testo }}</span>
           {% else %}<span class="badge bg-secondary">{{ sync_wordpress.testo }}</span>{% endif %}
           {% if sync_wordpress.job %}
           <div class="small mt-1">Job #{{ sync_wordpress.job.id }} · {{ sync_wordpress.job.tipo }} · {{ sync_wordpress.job.updated_at }}</div>
@@ -62,6 +63,30 @@
       <form method="post" action="{{ url_for("retry_post", id_iscrizione=iscrizione.id) }}" class="d-inline-block">
         <button type="submit" class="btn btn-outline-warning">Riprova creazione pagina</button>
       </form>
+      {% endif %}
+      {% if sync_wordpress.codice == "orphaned_vuoto" %}
+      <div class="alert alert-warning mt-3" role="alert">
+        Non risulta alcun job attivo. Il tentativo interrotto potrebbe avere già
+        creato risorse remote non registrate localmente: controlla WordPress prima
+        di avviare una nuova abilitazione.
+      </div>
+      <form method="post" action="{{ url_for("ripristina_abilitazione_interrotta", id_iscrizione=iscrizione.id) }}">
+        <button type="submit" class="btn btn-outline-warning">Ripristina a "Da abilitare"</button>
+      </form>
+      {% elif sync_wordpress.codice == "orphaned_completo" %}
+      <div class="alert alert-success mt-3" role="alert">
+        Utente, pagina e link WordPress risultano gia registrati localmente.
+        Il ripristino non crea job e non contatta WordPress.
+      </div>
+      <form method="post" action="{{ url_for("ripristina_abilitazione_interrotta", id_iscrizione=iscrizione.id) }}">
+        <button type="submit" class="btn btn-outline-success">Ripristina come Abilitata</button>
+      </form>
+      {% elif sync_wordpress.codice == "orphaned_ambiguo" %}
+      <div class="alert alert-danger mt-3" role="alert">
+        Le evidenze locali del provisioning sono parziali o discordanti. Non e
+        disponibile alcun ripristino automatico: eseguire una riconciliazione
+        esplicita prima di cambiare stato o creare nuovi job.
+      </div>
       {% endif %}
     </div>
   </section>
@@ -147,4 +172,9 @@
     {% endif %}
   </div>
 </div>
+{% if sync_wordpress.codice == "processing" %}
+<script>
+  window.setTimeout(function () { window.location.reload(); }, 5000);
+</script>
+{% endif %}
 {% endblock %}

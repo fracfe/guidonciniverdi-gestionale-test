@@ -59,6 +59,43 @@ class AbilitaIdempotenzaTest(unittest.TestCase):
             anno_percorso=anno_percorso,
         )
 
+    def aggiungi_provisioning_locale(
+        self, id_iscrizione=1, con_post=True, con_link=True, con_done=True
+    ):
+        iscrizione = db.session.get(IscrizioneEG, id_iscrizione)
+        utente = WordpressUser(
+            data=datetime.now(),
+            iscrizioni_id=id_iscrizione,
+            wordpress_id=20 + id_iscrizione,
+            username=f"wordpress-{id_iscrizione}",
+            password="password-locale",
+            meta={},
+        )
+        db.session.add(utente)
+        db.session.flush()
+        if con_post:
+            db.session.add(WordpressPost(
+                data=datetime.now(),
+                iscrizioni_id=id_iscrizione,
+                wordpress_user_id=utente.id,
+                wordpress_id=30 + id_iscrizione,
+                tipo="posts",
+                meta={},
+            ))
+        if con_link:
+            iscrizione.link = f"http://wordpress.test/post/{30 + id_iscrizione}"
+        if con_done:
+            db.session.add(JobWordpress(
+                data=datetime.now(),
+                stato="DONE",
+                tipo="crea_sq",
+                iscrizione_id=id_iscrizione,
+                updated_at=datetime.now(),
+                dati={"tipo": "crea_sq", "iscrizione": id_iscrizione},
+            ))
+        db.session.commit()
+        return utente
+
     def pannello(self, testo, id_pannello, id_pannello_successivo=None):
         inizio = testo.index(f'id="{id_pannello}"')
         if id_pannello_successivo is None:
@@ -168,6 +205,37 @@ class AbilitaIdempotenzaTest(unittest.TestCase):
         self.assertEqual(JobWordpress.query.one().stato, "SENDING")
         self.assertEqual(IscrizioneEG.query.get(1).stato, "in_abilitazione")
 
+    def test_get_abilita_passa_gruppo_e_zona_anche_con_username_occupato(self):
+        db.session.add(self.nuova_iscrizione(2))
+        db.session.flush()
+        db.session.add(WordpressUser(
+            data=datetime.now(),
+            iscrizioni_id=2,
+            wordpress_id=22,
+            username="verdi_1_test_1",
+            password="password-locale",
+            meta={},
+        ))
+        db.session.commit()
+
+        risposta = self.client.get("/abilita/1")
+        testo = risposta.get_data(as_text=True)
+
+        self.assertEqual(risposta.status_code, 200)
+        self.assertIn("Gruppo Test 1", testo)
+        self.assertIn("Zona Test", testo)
+        self.assertIn("Username non valido", testo)
+
+    def test_get_abilita_con_dati_territoriali_mancanti_non_genera_500(self):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.gruppo = 999
+        db.session.commit()
+
+        risposta = self.client.get("/abilita/1")
+
+        self.assertEqual(risposta.status_code, 302)
+        self.assertIn("/iscrizioni", risposta.location)
+
     def test_rendering_stati_e_azioni_provisioning(self):
         casi = [
             (
@@ -193,7 +261,14 @@ class AbilitaIdempotenzaTest(unittest.TestCase):
 
         for stato, etichetta, spiegazione, abilita_visibile in casi:
             with self.subTest(stato=stato):
+                JobWordpress.query.delete()
                 iscrizione.stato = stato
+                if stato == "in_abilitazione":
+                    db.session.add(JobWordpress(
+                        data=datetime.now(), stato="PENDING", tipo="crea_sq",
+                        iscrizione_id=1, updated_at=datetime.now(),
+                        dati={"tipo": "crea_sq", "iscrizione": 1},
+                    ))
                 db.session.commit()
                 risposta = self.client.get("/iscrizioni")
                 testo = risposta.get_data(as_text=True)
@@ -624,6 +699,152 @@ class AbilitaIdempotenzaTest(unittest.TestCase):
         self.assertEqual(jobs[0].stato, "FAILED")
         self.assertEqual((jobs[1].tipo, jobs[1].stato), ("update_sq", "PENDING"))
         self.assertEqual(db.session.get(IscrizioneEG, 1).stato, "abilitato")
+
+    def test_abilitazione_interrotta_e_ripristino_esplicito(self):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "in_abilitazione"
+        db.session.commit()
+
+        dettaglio = self.client.get("/dettagli/1").get_data(as_text=True)
+        lista = self.client.get("/iscrizioni").get_data(as_text=True)
+
+        self.assertIn("Abilitazione interrotta", dettaglio)
+        self.assertIn("Abilitazione interrotta", lista)
+        self.assertIn('Ripristina a "Da abilitare"', dettaglio)
+        self.assertIn("risorse remote non registrate localmente", dettaglio)
+        self.assertNotIn("window.location.reload", dettaglio)
+
+        risposta = self.client.post(
+            "/ripristina_abilitazione_interrotta/1", follow_redirects=True
+        )
+
+        self.assertEqual(db.session.get(IscrizioneEG, 1).stato, "da_abilitare")
+        self.assertEqual(JobWordpress.query.count(), 0)
+        self.assertEqual(WordpressUser.query.count(), 0)
+        self.assertEqual(WordpressPost.query.count(), 0)
+        self.assertIn(
+            "ripristinata a Da abilitare", risposta.get_data(as_text=True)
+        )
+
+    @patch.object(app_module.requests, "post")
+    def test_orfano_completo_viene_ripristinato_come_abilitato(
+        self, mock_wordpress_post
+    ):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "in_abilitazione"
+        self.aggiungi_provisioning_locale()
+        id_utente = WordpressUser.query.one().id
+        id_post = WordpressPost.query.one().id
+        link = iscrizione.link
+
+        dettaglio = self.client.get("/dettagli/1").get_data(as_text=True)
+        self.assertIn("Provisioning completato da ripristinare", dettaglio)
+        self.assertIn("Ripristina come Abilitata", dettaglio)
+
+        risposta = self.client.post(
+            "/ripristina_abilitazione_interrotta/1", follow_redirects=True
+        )
+
+        self.assertEqual(db.session.get(IscrizioneEG, 1).stato, "abilitato")
+        self.assertEqual(db.session.get(IscrizioneEG, 1).link, link)
+        self.assertEqual(WordpressUser.query.one().id, id_utente)
+        self.assertEqual(WordpressPost.query.one().id, id_post)
+        self.assertEqual(JobWordpress.query.count(), 1)
+        self.assertEqual(JobWordpress.query.one().stato, "DONE")
+        self.assertIn(
+            "ripristinata come Abilitata", risposta.get_data(as_text=True)
+        )
+        mock_wordpress_post.assert_not_called()
+
+    @patch.object(app_module.requests, "post")
+    def test_orfano_parziale_fallisce_chiuso_senza_modifiche(
+        self, mock_wordpress_post
+    ):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "in_abilitazione"
+        self.aggiungi_provisioning_locale(
+            con_post=False, con_link=False, con_done=False
+        )
+        id_utente = WordpressUser.query.one().id
+
+        dettaglio = self.client.get("/dettagli/1").get_data(as_text=True)
+        self.assertIn(
+            "Provisioning interrotto - stato da riconciliare", dettaglio
+        )
+        self.assertNotIn("Ripristina come Abilitata", dettaglio)
+        self.assertNotIn('Ripristina a "Da abilitare"', dettaglio)
+
+        self.client.post("/ripristina_abilitazione_interrotta/1")
+
+        self.assertEqual(
+            db.session.get(IscrizioneEG, 1).stato, "in_abilitazione"
+        )
+        self.assertEqual(WordpressUser.query.one().id, id_utente)
+        self.assertEqual(WordpressPost.query.count(), 0)
+        self.assertEqual(JobWordpress.query.count(), 0)
+        mock_wordpress_post.assert_not_called()
+
+    def test_storico_done_senza_mirror_o_link_rimane_ambiguo(self):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "in_abilitazione"
+        db.session.add(JobWordpress(
+            data=datetime.now(),
+            stato="DONE",
+            tipo="crea_sq",
+            iscrizione_id=1,
+            updated_at=datetime.now(),
+            dati={"tipo": "crea_sq", "iscrizione": 1},
+        ))
+        db.session.commit()
+
+        dettaglio = self.client.get("/dettagli/1").get_data(as_text=True)
+        self.assertIn("stato da riconciliare", dettaglio)
+
+        self.client.post("/ripristina_abilitazione_interrotta/1")
+
+        self.assertEqual(
+            db.session.get(IscrizioneEG, 1).stato, "in_abilitazione"
+        )
+        self.assertEqual(JobWordpress.query.count(), 1)
+
+    def test_abilita_rifiuta_iscrizione_gia_provisionata(self):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "da_abilitare"
+        self.aggiungi_provisioning_locale()
+
+        risposta = self.client.post(
+            "/abilita/1",
+            data={"username": "nuovo-username"},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(risposta.status_code, 200)
+        self.assertIn("gia completato", risposta.get_data(as_text=True))
+        self.assertEqual(db.session.get(IscrizioneEG, 1).stato, "da_abilitare")
+        self.assertEqual(JobWordpress.query.count(), 1)
+        self.assertEqual(JobWordpress.query.one().stato, "DONE")
+        self.assertEqual(WordpressUser.query.count(), 1)
+        self.assertEqual(WordpressPost.query.count(), 1)
+
+    def test_job_attivo_abilita_auto_refresh_e_blocca_ripristino(self):
+        iscrizione = db.session.get(IscrizioneEG, 1)
+        iscrizione.stato = "in_abilitazione"
+        db.session.add(JobWordpress(
+            data=datetime.now(), stato="PENDING", tipo="crea_sq",
+            iscrizione_id=1, updated_at=datetime.now(),
+            dati={"tipo": "crea_sq", "iscrizione": 1, "username": "verdi"},
+        ))
+        db.session.commit()
+
+        dettaglio = self.client.get("/dettagli/1").get_data(as_text=True)
+        self.assertIn("Aggiornamento in corso", dettaglio)
+        self.assertIn("window.setTimeout", dettaglio)
+        self.assertIn("5000", dettaglio)
+        self.assertNotIn('Ripristina a "Da abilitare"', dettaglio)
+
+        self.client.post("/ripristina_abilitazione_interrotta/1")
+        self.assertEqual(db.session.get(IscrizioneEG, 1).stato, "in_abilitazione")
+        self.assertEqual(JobWordpress.query.count(), 1)
 
     @patch.object(app_module, "richiesta_wordpress_reset_password")
     def test_reset_password_aggiorna_locale_solo_dopo_successo(self, mock_reset):

@@ -1,5 +1,14 @@
-{% macro badge_stato_iscrizione(stato, descrizione=false) %}
-  {% if stato == "da_abilitare" %}
+{% macro badge_stato_iscrizione(stato, descrizione=false, abilitazione_interrotta=false) %}
+  {% if stato == "in_abilitazione" and abilitazione_interrotta == "completo" %}
+    <span class="badge bg-success">Provisioning completato da ripristinare</span>
+    {% if descrizione %}<div class="small text-success mt-1">Utente, pagina e link locali sono presenti: l'iscrizione puo essere ripristinata come abilitata.</div>{% endif %}
+  {% elif stato == "in_abilitazione" and abilitazione_interrotta == "ambiguo" %}
+    <span class="badge bg-danger">Provisioning interrotto - stato da riconciliare</span>
+    {% if descrizione %}<div class="small text-danger mt-1">Le evidenze locali sono parziali o discordanti: non avviare una nuova abilitazione.</div>{% endif %}
+  {% elif stato == "in_abilitazione" and abilitazione_interrotta %}
+    <span class="badge bg-danger">Abilitazione interrotta</span>
+    {% if descrizione %}<div class="small text-danger mt-1">Nessun job WordPress attivo: è richiesto un controllo operativo.</div>{% endif %}
+  {% elif stato == "da_abilitare" %}
     <span class="badge bg-warning text-dark">Da abilitare</span>
     {% if descrizione %}<div class="small text-muted mt-1">La squadriglia può essere abilitata.</div>{% endif %}
   {% elif stato == "in_abilitazione" %}

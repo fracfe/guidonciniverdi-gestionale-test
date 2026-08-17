@@ -1,0 +1,97 @@
+name: Test e validazione
+
+on:
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            gestionale/requirements.txt
+            gestionale-daemon/requirements.txt
+      - name: Installa dipendenze
+        run: pip install -r gestionale/requirements.txt -r gestionale-daemon/requirements.txt
+      - name: Verifica whitespace e migration
+        run: |
+          git diff --check
+          git diff --check HEAD^ HEAD
+          python scripts/check_migrations.py
+      - name: Verifica shared e test Python
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -c "from shared.mail_riepilogo import genera_mail_riepilogo_iscrizione"
+          python -m unittest shared.test_mail_riepilogo -v
+          python -m unittest discover -s gestionale -p "test_*.py" -v
+          python -m unittest discover -s gestionale-daemon -p "test_*.py" -v
+      - name: Build immagini dal context root
+        run: |
+          docker build . -f gestionale/Dockerfile -t gv-ci-gestionale
+          docker build . -f gestionale-daemon/Dockerfile -t gv-ci-daemon
+          docker run --rm --entrypoint python gv-ci-gestionale -c "import shared.mail_riepilogo"
+          docker run --rm --entrypoint python gv-ci-daemon -c "import shared.mail_riepilogo"
+
+  migration-mariadb:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_DATABASE: gv_ci
+          MARIADB_USER: gv_ci
+          MARIADB_PASSWORD: gv_ci_password
+          MARIADB_ROOT_PASSWORD: gv_ci_root_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: gestionale/requirements.txt
+      - name: Installa dipendenze Gestionale
+        run: pip install -r gestionale/requirements.txt
+      - name: Upgrade database vuoto e verifica head
+        working-directory: gestionale
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          FLASK_APP: app.py
+          DB_TYPE: mariadb
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: gv_ci
+          DB_USER: gv_ci
+          DB_PASSWORD: gv_ci_password
+          SECRET_KEY: ci-only-secret
+        run: |
+          flask db upgrade
+          test "$(flask db heads | awk '{print $1}')" = "91c4f2b7a6de"
+          flask db current | grep "91c4f2b7a6de"
+      - name: Test concorrenza reale MariaDB
+        working-directory: gestionale
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DB_TYPE: mariadb
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: gv_ci
+          DB_USER: gv_ci
+          DB_PASSWORD: gv_ci_password
+          SECRET_KEY: ci-only-secret
+          RUN_MARIADB_INTEGRATION: "1"
+        run: python -m unittest test_mariadb_concorrenza.py -v

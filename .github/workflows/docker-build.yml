@@ -5,7 +5,13 @@ on:
     branches: [ "main" ]
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build-gestionale:
+    needs: verify
     runs-on: ubuntu-latest
 
     permissions:
@@ -31,6 +37,7 @@ jobs:
         docker push ghcr.io/egit-guidoncini-verdi/guidonciniverdi-gestionale:latest
 
   build-daemon:
+    needs: verify
     runs-on: ubuntu-latest
 
     permissions:

@@ -280,7 +280,60 @@ def job_wordpress_attivo(iscrizione_id, blocca=False):
     ).order_by(JobWordpress.id.desc())
     if blocca:
         query = query.with_for_update()
-    return query.first()
+    job = query.first()
+    if job:
+        return job
+    legacy = JobWordpress.query.filter(
+        JobWordpress.iscrizione_id.is_(None),
+        JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+    ).order_by(JobWordpress.id.desc())
+    if blocca:
+        legacy = legacy.with_for_update()
+    return next(
+        (
+            candidato
+            for candidato in legacy
+            if isinstance(candidato.dati, dict)
+            and candidato.dati.get("iscrizione") == iscrizione_id
+        ),
+        None,
+    )
+
+
+def accoda_update_wordpress_con_lock(session, iscrizione_id):
+    """Accoda un update mantenendo il lock limitato alla singola iscrizione."""
+    iscrizione = (
+        session.query(IscrizioneEG)
+        .filter_by(id=iscrizione_id)
+        .with_for_update()
+        .first()
+    )
+    if not iscrizione:
+        raise ValueError("iscrizione non trovata")
+    if iscrizione.stato != "abilitato":
+        raise ValueError("iscrizione non abilitata")
+    job_attivo = (
+        session.query(JobWordpress)
+        .filter(
+            JobWordpress.iscrizione_id == iscrizione_id,
+            JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+        )
+        .order_by(JobWordpress.id.desc())
+        .with_for_update()
+        .first()
+    )
+    if job_attivo:
+        return False
+    adesso = datetime.now()
+    session.add(JobWordpress(
+        data=adesso,
+        stato="PENDING",
+        tipo="update_sq",
+        iscrizione_id=iscrizione_id,
+        updated_at=adesso,
+        dati={"iscrizione": iscrizione_id, "tipo": "update_sq"},
+    ))
+    return True
 
 
 def meta_wordpress_iscrizione(iscrizione):
@@ -301,6 +354,67 @@ def meta_wordpress_iscrizione(iscrizione):
     }
 
 
+def classifica_provisioning_locale(iscrizione):
+    """Classifica un provisioning orfano usando soltanto evidenze locali."""
+    utenti_wordpress = WordpressUser.query.filter_by(
+        iscrizioni_id=iscrizione.id
+    ).all()
+    post_wordpress = WordpressPost.query.filter_by(
+        iscrizioni_id=iscrizione.id, tipo="posts"
+    ).all()
+
+    job_done = JobWordpress.query.filter(
+        JobWordpress.stato == "DONE",
+        (JobWordpress.iscrizione_id == iscrizione.id)
+        | JobWordpress.iscrizione_id.is_(None),
+    ).all()
+    crea_sq_done = False
+    storico_discordante = False
+    for job in job_done:
+        dati = job.dati if isinstance(job.dati, dict) else {}
+        tipo = job.tipo or dati.get("tipo")
+        if tipo != "crea_sq":
+            continue
+        id_payload = dati.get("iscrizione")
+        coerente_fk = job.iscrizione_id in (None, iscrizione.id)
+        coerente_payload = id_payload == iscrizione.id
+        if coerente_fk and coerente_payload:
+            crea_sq_done = True
+        elif job.iscrizione_id == iscrizione.id or id_payload == iscrizione.id:
+            storico_discordante = True
+
+    indicatori = {
+        "wordpress_user": bool(utenti_wordpress),
+        "wordpress_post": bool(post_wordpress),
+        "link": bool(iscrizione.link and iscrizione.link.strip()),
+        "crea_sq_done": crea_sq_done,
+        "storico_discordante": storico_discordante,
+        "mirror_duplicati": (
+            len(utenti_wordpress) > 1 or len(post_wordpress) > 1
+        ),
+    }
+    if not any([
+        indicatori["wordpress_user"],
+        indicatori["wordpress_post"],
+        indicatori["link"],
+        indicatori["crea_sq_done"],
+        indicatori["storico_discordante"],
+        indicatori["mirror_duplicati"],
+    ]):
+        codice = "vuoto"
+    elif (
+        indicatori["wordpress_user"]
+        and indicatori["wordpress_post"]
+        and indicatori["link"]
+        and not indicatori["storico_discordante"]
+        and not indicatori["mirror_duplicati"]
+    ):
+        codice = "completo"
+    else:
+        codice = "ambiguo"
+    return {"codice": codice, "indicatori": indicatori}
+
+
 def stato_sincronizzazione_wordpress(iscrizione, wordpress_user, wordpress_post):
     ultimo_job = JobWordpress.query.filter_by(
         iscrizione_id=iscrizione.id
@@ -309,6 +423,19 @@ def stato_sincronizzazione_wordpress(iscrizione, wordpress_user, wordpress_post)
         return {"codice": "processing", "testo": "Aggiornamento in corso", "job": ultimo_job}
     if ultimo_job and ultimo_job.stato == "FAILED" and ultimo_job.tipo == "update_sq":
         return {"codice": "failed", "testo": "Errore di sincronizzazione", "job": ultimo_job}
+    if iscrizione.stato == "in_abilitazione":
+        classificazione = classifica_provisioning_locale(iscrizione)
+        testi = {
+            "vuoto": "Abilitazione interrotta",
+            "completo": "Provisioning completato da ripristinare",
+            "ambiguo": "Provisioning interrotto - stato da riconciliare",
+        }
+        return {
+            "codice": f"orphaned_{classificazione['codice']}",
+            "testo": testi[classificazione["codice"]],
+            "job": ultimo_job,
+            "classificazione": classificazione["codice"],
+        }
     if iscrizione.stato == "abilitato" and wordpress_user and wordpress_post:
         return {"codice": "done", "testo": "Sincronizzato", "job": ultimo_job}
     return {"codice": "none", "testo": "Non sincronizzato", "job": ultimo_job}
@@ -583,8 +710,30 @@ def iscrizioni():
         ),
         "abilitate": sum(i[0].stato == "abilitato" for i in iscritti),
     }
+    ids_visibili = [i[0].id for i in iscritti]
+    job_attivi_ids = set()
+    if ids_visibili:
+        job_attivi_ids = {
+            iscrizione_id
+            for (iscrizione_id,) in db.session.query(
+                JobWordpress.iscrizione_id
+            ).filter(
+                JobWordpress.iscrizione_id.in_(ids_visibili),
+                JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+            ).distinct()
+        }
+    classificazioni_orfani = {
+        iscrizione.id: classifica_provisioning_locale(iscrizione)["codice"]
+        for iscrizione, _gruppo, _zona in iscritti
+        if iscrizione.stato == "in_abilitazione"
+        and iscrizione.id not in job_attivi_ids
+    }
     return render_template(
-        "iscrizioni.html", iscritti=iscritti, conteggi_tab=conteggi_tab
+        "iscrizioni.html",
+        iscritti=iscritti,
+        conteggi_tab=conteggi_tab,
+        job_attivi_ids=job_attivi_ids,
+        classificazioni_orfani=classificazioni_orfani,
     )
 
 @app.route("/report")
@@ -791,15 +940,10 @@ def edit_iscrizione(id_iscrizione):
                 ).first()
                 if not wordpress_user:
                     raise ValueError("utente WordPress locale non presente")
-                adesso = datetime.now()
-                db.session.add(JobWordpress(
-                    data=adesso,
-                    stato="PENDING",
-                    tipo="update_sq",
-                    iscrizione_id=iscrizione.id,
-                    updated_at=adesso,
-                    dati={"iscrizione": iscrizione.id, "tipo": "update_sq"},
-                ))
+                if not accoda_update_wordpress_con_lock(
+                    db.session, iscrizione.id
+                ):
+                    raise RuntimeError("job WordPress già attivo")
             db.session.commit()
         except (KeyError, TypeError, ValueError, PermissionError, RuntimeError) as exc:
             db.session.rollback()
@@ -920,6 +1064,54 @@ def retry_sync(id_iscrizione):
     return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
 
 
+@app.route(
+    "/ripristina_abilitazione_interrotta/<int:id_iscrizione>",
+    methods=["POST"],
+)
+@login_required
+def ripristina_abilitazione_interrotta(id_iscrizione):
+    try:
+        iscrizione = IscrizioneEG.query.filter_by(
+            id=id_iscrizione
+        ).with_for_update().first()
+        if not puo_gestire_iscrizione(current_user, iscrizione):
+            raise PermissionError("competenza non valida")
+        if iscrizione.stato != "in_abilitazione":
+            raise ValueError("iscrizione non in abilitazione")
+        if job_wordpress_attivo(iscrizione.id, blocca=True):
+            raise RuntimeError("job WordPress ancora attivo")
+        classificazione = classifica_provisioning_locale(iscrizione)["codice"]
+        if classificazione == "vuoto":
+            iscrizione.stato = "da_abilitare"
+            messaggio = "Iscrizione ripristinata a Da abilitare."
+            categoria = "warning"
+        elif classificazione == "completo":
+            iscrizione.stato = "abilitato"
+            messaggio = "Iscrizione ripristinata come Abilitata."
+            categoria = "success"
+        else:
+            raise RuntimeError("provisioning locale parziale o ambiguo")
+        db.session.commit()
+        flash(messaggio, categoria)
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        db.session.rollback()
+        app.logger.warning(
+            "Ripristino abilitazione interrotta rifiutato iscrizione_id=%s motivo=%s",
+            id_iscrizione,
+            str(exc),
+        )
+        flash("L'abilitazione non può essere ripristinata.", "warning")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error(
+            "Ripristino abilitazione interrotta fallito iscrizione_id=%s motivo=%s",
+            id_iscrizione,
+            type(exc).__name__,
+        )
+        flash("Errore durante il ripristino dell'abilitazione.", "warning")
+    return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
+
+
 @app.route("/reset_password_wordpress/<int:id_iscrizione>", methods=["GET", "POST"])
 @login_required
 def reset_password_wordpress(id_iscrizione):
@@ -1009,14 +1201,51 @@ def export_iscrizione(id_iscrizione):
 @app.route("/abilita/<id_iscrizione>", methods=["GET", "POST"])
 @login_required
 def abilita(id_iscrizione):
-    if not StatusPercorso.query.filter_by(regione=current_user.regione).filter_by(anno=SysOption.query.filter_by(key="AnnoCorrente").first().value).first().abilitazioni:
+    tmp_iscrizione = db.session.get(IscrizioneEG, int(id_iscrizione))
+    if not puo_gestire_iscrizione(current_user, tmp_iscrizione):
+        flash("Non hai i permessi per abilitare questa iscrizione.", "warning")
         return redirect(url_for("iscrizioni"))
-    tmp_iscrizione = IscrizioneEG.query.filter_by(id=id_iscrizione).first()
+    anno_corrente = db.session.get(SysOption, "AnnoCorrente")
+    stato_percorso = None
+    if anno_corrente:
+        stato_percorso = StatusPercorso.query.filter_by(
+            regione=tmp_iscrizione.regione, anno=anno_corrente.value
+        ).first()
+    if not stato_percorso or not stato_percorso.abilitazioni:
+        flash("Le abilitazioni non sono aperte per questa iscrizione.", "warning")
+        return redirect(url_for("iscrizioni"))
     if tmp_iscrizione.stato not in ["da_abilitare", "failed_user"]:
         flash("La richiesta è già in lavorazione o non può essere riabilitata.", "warning")
         return redirect(url_for("iscrizioni"))
-    tmp_gruppo = Gruppo.query.filter_by(id=tmp_iscrizione.gruppo).first()
-    tmp_zona = Zona.query.filter_by(id=tmp_iscrizione.zona).first()
+    if job_wordpress_attivo(tmp_iscrizione.id):
+        if request.method == "POST":
+            tmp_iscrizione.stato = "in_abilitazione"
+            db.session.commit()
+        flash("Esiste gia un'operazione WordPress attiva per questa iscrizione.", "warning")
+        return redirect(url_for("dettagli", id_iscrizione=tmp_iscrizione.id))
+    classificazione = classifica_provisioning_locale(tmp_iscrizione)["codice"]
+    if classificazione != "vuoto":
+        if classificazione == "completo":
+            messaggio = (
+                "Il provisioning WordPress risulta gia completato: "
+                "ripristina l'iscrizione come Abilitata dal dettaglio."
+            )
+        else:
+            messaggio = (
+                "Il provisioning WordPress risulta parziale o incoerente e "
+                "deve essere riconciliato prima di una nuova abilitazione."
+            )
+        flash(messaggio, "warning")
+        return redirect(url_for("dettagli", id_iscrizione=tmp_iscrizione.id))
+    tmp_gruppo = db.session.get(Gruppo, tmp_iscrizione.gruppo)
+    tmp_zona = db.session.get(Zona, tmp_iscrizione.zona)
+    if not tmp_gruppo or not tmp_zona:
+        app.logger.warning(
+            "Abilitazione rifiutata iscrizione_id=%s motivo=dati territoriali mancanti",
+            tmp_iscrizione.id,
+        )
+        flash("I dati di Gruppo o Zona dell'iscrizione non sono validi.", "warning")
+        return redirect(url_for("iscrizioni"))
     tmp_username = f"{tmp_iscrizione.nome.strip(' ')}_{tmp_gruppo.gruppo.lower()}".replace(" ", "_").lower()
     if request.method == "POST":
         try:
@@ -1027,7 +1256,14 @@ def abilita(id_iscrizione):
     if db.session.query(WordpressUser.query.filter_by(username=tmp_username).exists()).scalar():
         valid_username = False
     if not valid_username:
-        return render_template("abilita.html", iscrizione=tmp_iscrizione, username=tmp_username, valid_username=valid_username)
+        return render_template(
+            "abilita.html",
+            iscrizione=tmp_iscrizione,
+            gruppo=tmp_gruppo,
+            zona=tmp_zona,
+            username=tmp_username,
+            valid_username=valid_username,
+        )
     if request.method == "POST":
         tmp_meta = meta_wordpress_iscrizione(tmp_iscrizione)
 

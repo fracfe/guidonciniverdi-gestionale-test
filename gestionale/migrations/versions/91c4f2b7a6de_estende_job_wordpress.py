@@ -1,7 +1,7 @@
 """estende job wordpress per stato operativo
 
 Revision ID: 91c4f2b7a6de
-Revises: 2cc4384ffa62
+Revises: 42b33e98a7ee
 Create Date: 2026-08-17
 
 """

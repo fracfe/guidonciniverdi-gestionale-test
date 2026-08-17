@@ -1,7 +1,13 @@
 credenziali.json
 *.db
 __pycache__
+**/__pycache__/
+*.pyc
 .env
+**/.env
+**/.env.*
+!**/.env.example
+*.patch
 gruppi.csv
 gruppi_piemonte.csv
 gruppi_puglia.csv
