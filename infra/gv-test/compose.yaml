@@ -2,6 +2,7 @@ name: gv-test
 
 services:
   gestionale-db:
+    restart: unless-stopped
     image: mariadb:11.4
     environment:
       MARIADB_DATABASE: ${GV_DB_NAME}
@@ -18,6 +19,7 @@ services:
     networks: [gv-test]
 
   gestionale:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: gestionale/Dockerfile
@@ -40,6 +42,7 @@ services:
     networks: [gv-test]
 
   wordpress-db:
+    restart: unless-stopped
     image: mariadb:11.4
     environment:
       MARIADB_DATABASE: ${WP_DB_NAME}
@@ -61,6 +64,7 @@ services:
     networks: [gv-test]
 
   wordpress:
+    restart: unless-stopped
     image: wordpress:php8.3-apache
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
@@ -82,12 +86,14 @@ services:
     networks: [gv-test]
 
   mailpit:
+    restart: unless-stopped
     image: axllent/mailpit:v1.21
     ports:
       - "${MAILPIT_HTTP_PORT:-8025}:8025"
     networks: [gv-test]
 
   gestionale-daemon:
+    restart: unless-stopped
     profiles: [integration]
     build:
       context: ../..
