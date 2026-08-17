@@ -4,7 +4,7 @@ from jinja2 import Environment, FileSystemLoader
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import sleep
 import threading
 import schedule
@@ -15,10 +15,13 @@ import base64
 import json
 import os
 import logging
+from shared.mail_riepilogo import genera_mail_riepilogo_iscrizione
 
 
 logger = logging.getLogger("guidonciniverdi.daemon.wordpress")
 WORDPRESS_TIMEOUT = (5, 30)
+JOB_STALE_AFTER = timedelta(minutes=15)
+JOB_MAX_ATTEMPTS = 3
 
 
 class WordpressRequestError(Exception):
@@ -171,6 +174,20 @@ class JobWordpress(Base):
     id = Column(Integer, primary_key=True)
     data = Column(DateTime, nullable=False)
     stato = Column(String(255), nullable=False)
+    tipo = Column(String(255), nullable=False, default="crea_sq")
+    iscrizione_id = Column(
+        Integer,
+        ForeignKey(
+            "iscrizioni_eg.id",
+            name="fk_job_wordpress_iscrizioni_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    started_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
     dati = Column(JSON, nullable=False)
 
 class StatusPercorso(Base):
@@ -220,10 +237,21 @@ demone_telegram = True
 demone_notifiche = True
 demone_wordpress = True
 
-def manda_mail(indirizzi, copia, titolo, testo, regione):
+def manda_mail(indirizzi, copia, titolo, testo, regione, anno=None):
     session = Session()
     try:
-        session.add(CodaMail(data=datetime.now(), stato="PENDING", regione=regione, indirizzi=indirizzi, indirizzi_copia=copia, titolo=f"Guidoncini Verdi {session.query(SysOption).filter_by(key='AnnoCorrente').first().value} - {titolo}", testo=testo))
+        anno_mail = anno or session.query(SysOption).filter_by(
+            key="AnnoCorrente"
+        ).first().value
+        session.add(CodaMail(
+            data=datetime.now(),
+            stato="PENDING",
+            regione=regione,
+            indirizzi=indirizzi,
+            indirizzi_copia=copia,
+            titolo=f"Guidoncini Verdi {anno_mail} - {titolo}",
+            testo=testo,
+        ))
         session.commit()
         return True
     except Exception:
@@ -461,7 +489,7 @@ def contesto_job_wordpress(tmp_job):
     dati = tmp_job.dati if isinstance(tmp_job.dati, dict) else {}
     return {
         "job_id": tmp_job.id,
-        "iscrizione": dati.get("iscrizione"),
+        "iscrizione": tmp_job.iscrizione_id or dati.get("iscrizione"),
         "username": dati.get("username"),
         "regione": None,
         "stato_iscrizione_errore": None,
@@ -484,11 +512,13 @@ def log_errore_wordpress(contesto, errore):
     )
 
 
-def marca_job_wordpress_fallito(session, contesto):
+def marca_job_wordpress_fallito(session, contesto, motivo):
     try:
         tmp_job = session.get(JobWordpress, contesto["job_id"])
         if tmp_job:
             tmp_job.stato = "FAILED"
+            tmp_job.updated_at = datetime.now()
+            tmp_job.last_error = motivo
         if contesto["iscrizione"] and contesto["stato_iscrizione_errore"]:
             tmp_iscrizione = session.get(IscrizioneEG, contesto["iscrizione"])
             if tmp_iscrizione:
@@ -654,6 +684,8 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
     regione_mail = tmp_iscrizione.regione
 
     tmp_job.stato = "DONE"
+    tmp_job.updated_at = datetime.now()
+    tmp_job.last_error = None
     tmp_iscrizione.link = link_post
     tmp_iscrizione.stato = "abilitato"
     session.commit()
@@ -665,6 +697,7 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
             "Credenziali Diario di Bordo!",
             testo_mail_sq,
             regione_mail,
+            anno=tmp_job.dati["meta"].get("anno"),
         )
     except Exception as exc:
         logger.error(
@@ -675,6 +708,157 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
             contesto["username"],
             contesto["regione"],
             type(exc).__name__,
+        )
+
+
+def meta_wordpress_iscrizione(session, iscrizione):
+    gruppo = session.get(Gruppo, iscrizione.gruppo)
+    zona = session.get(Zona, iscrizione.zona)
+    regione = session.get(Regione, iscrizione.regione)
+    percorso = session.get(StatusPercorso, iscrizione.anno_percorso)
+    if not all([gruppo, zona, regione, percorso]):
+        raise ValueError("dati territoriali o percorso non validi")
+    return {
+        "anno": percorso.anno,
+        "gruppo": gruppo.gruppo.capitalize(),
+        "rinnovo": iscrizione.tipo != "conquista",
+        "specialita": iscrizione.specialita.title(),
+        "squadriglia": iscrizione.nome.capitalize(),
+        "regione": regione.regione.capitalize(),
+        "zona": zona.zona.removeprefix("ZONA ").title(),
+    }, gruppo, zona
+
+
+def id_specialita_wordpress(header, nome_specialita):
+    endpoint = "/specialita?per_page=100"
+    elenco, status_http = richiesta_wordpress_json(
+        "GET", endpoint, header, "lettura specialita"
+    )
+    if not isinstance(elenco, list):
+        raise WordpressRequestError(
+            "lettura specialita",
+            endpoint,
+            "risposta JSON inattesa: elenco specialita non valido",
+            status_http=status_http,
+        )
+    id_specialita = next(
+        (
+            voce.get("id")
+            for voce in elenco
+            if isinstance(voce, dict) and voce.get("name") == nome_specialita
+        ),
+        None,
+    )
+    if not isinstance(id_specialita, int):
+        raise WordpressRequestError(
+            "lettura specialita",
+            endpoint,
+            "specialita richiesta non trovata",
+            status_http=status_http,
+        )
+    return id_specialita
+
+
+def processa_job_update_squadriglia(session, tmp_job, header, contesto):
+    iscrizione = session.get(IscrizioneEG, tmp_job.iscrizione_id)
+    if not iscrizione:
+        raise ValueError("iscrizione non trovata")
+    wordpress_user = session.query(WordpressUser).filter_by(
+        iscrizioni_id=iscrizione.id
+    ).first()
+    wordpress_post = session.query(WordpressPost).filter_by(
+        iscrizioni_id=iscrizione.id, tipo="posts"
+    ).first()
+    if not wordpress_user or not wordpress_post:
+        raise WordpressRequestError(
+            "aggiornamento risorse",
+            "/users|/posts",
+            "risorsa WordPress locale non presente",
+        )
+
+    contesto["regione"] = iscrizione.regione
+    contesto["username"] = wordpress_user.username
+    meta, gruppo, zona = meta_wordpress_iscrizione(session, iscrizione)
+    contesto["fase"] = "aggiornamento utente"
+    endpoint_utente = f"/users/{wordpress_user.wordpress_id}"
+    payload_utente, status_utente = richiesta_wordpress_json(
+        "POST",
+        endpoint_utente,
+        header,
+        "aggiornamento utente",
+        dati={"name": iscrizione.nome, "meta": meta},
+    )
+    id_utente = id_wordpress(
+        payload_utente, "aggiornamento utente", endpoint_utente, status_utente
+    )
+    if id_utente != wordpress_user.wordpress_id:
+        raise WordpressRequestError(
+            "aggiornamento utente",
+            endpoint_utente,
+            "risposta JSON inattesa: id risorsa non corrispondente",
+            status_http=status_utente,
+        )
+
+    contesto["fase"] = "aggiornamento post"
+    id_specialita = id_specialita_wordpress(header, meta["specialita"])
+    endpoint_post = f"/posts/{wordpress_post.wordpress_id}"
+    dati_post = {
+        "title": iscrizione.nome,
+        "meta": meta,
+        "specialita": [id_specialita],
+    }
+    payload_post, status_post = richiesta_wordpress_json(
+        "POST", endpoint_post, header, "aggiornamento post", dati=dati_post
+    )
+    id_post = id_wordpress(
+        payload_post, "aggiornamento post", endpoint_post, status_post
+    )
+    if id_post != wordpress_post.wordpress_id:
+        raise WordpressRequestError(
+            "aggiornamento post",
+            endpoint_post,
+            "risposta JSON inattesa: id risorsa non corrispondente",
+            status_http=status_post,
+        )
+
+    dati_utente_locali = dict(wordpress_user.meta or {})
+    dati_utente_locali["name"] = iscrizione.nome
+    dati_utente_locali["meta"] = meta
+    wordpress_user.meta = dati_utente_locali
+    dati_post_locali = dict(wordpress_post.meta or {})
+    dati_post_locali.update(dati_post)
+    wordpress_post.meta = dati_post_locali
+    tmp_job.stato = "DONE"
+    tmp_job.updated_at = datetime.now()
+    tmp_job.last_error = None
+    session.commit()
+
+    try:
+        regione = session.get(Regione, iscrizione.regione)
+        percorso = session.get(StatusPercorso, iscrizione.anno_percorso)
+        riepilogo = genera_mail_riepilogo_iscrizione(
+            iscrizione,
+            regione,
+            zona,
+            gruppo,
+            percorso,
+            wordpress_user=wordpress_user,
+            operazione="modifica",
+        )
+        manda_mail(
+            riepilogo["destinatari"],
+            riepilogo["copia"],
+            riepilogo["oggetto"],
+            riepilogo["html"],
+            iscrizione.regione,
+            anno=riepilogo["anno"],
+        )
+    except Exception as exc:
+        logger.error(
+            "Accodamento mail aggiornamento fallito job_id=%s iscrizione=%s "
+            "username=%s regione=%s motivo=%s",
+            contesto["job_id"], contesto["iscrizione"], contesto["username"],
+            contesto["regione"], type(exc).__name__,
         )
 
 
@@ -693,16 +877,27 @@ def processa_prossimo_job_wordpress(header, session_factory=Session):
 
         contesto = contesto_job_wordpress(tmp_job)
         tmp_job.stato = "SENDING"
+        tmp_job.started_at = datetime.now()
+        tmp_job.updated_at = tmp_job.started_at
+        tmp_job.attempts = (tmp_job.attempts or 0) + 1
+        tmp_job.last_error = None
         session.commit()
 
-        if not isinstance(tmp_job.dati, dict) or tmp_job.dati.get("tipo") != "crea_sq":
+        if not isinstance(tmp_job.dati, dict):
+            raise ValueError("payload job non valido")
+        tipo_job = tmp_job.tipo or tmp_job.dati.get("tipo") or "crea_sq"
+        if tipo_job == "crea_sq":
+            contesto["stato_iscrizione_errore"] = "failed_user"
+            processa_job_crea_squadriglia(session, tmp_job, header, contesto)
+        elif tipo_job == "update_sq":
+            processa_job_update_squadriglia(session, tmp_job, header, contesto)
+        else:
             raise ValueError("tipo job non supportato")
-        processa_job_crea_squadriglia(session, tmp_job, header, contesto)
         return True
     except WordpressRequestError as exc:
         session.rollback()
         log_errore_wordpress(contesto, exc)
-        marca_job_wordpress_fallito(session, contesto)
+        marca_job_wordpress_fallito(session, contesto, exc.motivo)
         return True
     except Exception as exc:
         session.rollback()
@@ -717,7 +912,9 @@ def processa_prossimo_job_wordpress(header, session_factory=Session):
                 contesto["fase"],
                 type(exc).__name__,
             )
-            marca_job_wordpress_fallito(session, contesto)
+            marca_job_wordpress_fallito(
+                session, contesto, f"eccezione inattesa {type(exc).__name__}"
+            )
         else:
             logger.error(
                 "Lettura coda JobWordpress fallita motivo=%s",
@@ -728,30 +925,77 @@ def processa_prossimo_job_wordpress(header, session_factory=Session):
         session.close()
 
 
+def recupera_job_wordpress_stale(session_factory=Session, adesso=None):
+    session = session_factory()
+    adesso = adesso or datetime.now()
+    soglia = adesso - JOB_STALE_AFTER
+    try:
+        stale = session.query(JobWordpress).filter(
+            JobWordpress.stato == "SENDING",
+            JobWordpress.updated_at < soglia,
+        ).all()
+        for job in stale:
+            job.updated_at = adesso
+            if (job.attempts or 0) < JOB_MAX_ATTEMPTS:
+                job.stato = "PENDING"
+                job.started_at = None
+                job.last_error = "Job stale recuperato e riportato in coda"
+                logger.warning(
+                    "Recovery JobWordpress stale job_id=%s iscrizione=%s tipo=%s attempts=%s",
+                    job.id, job.iscrizione_id, job.tipo, job.attempts,
+                )
+            else:
+                job.stato = "FAILED"
+                job.last_error = "Job stale: numero massimo di tentativi raggiunto"
+                if job.tipo == "crea_sq" and job.iscrizione_id:
+                    iscrizione = session.get(IscrizioneEG, job.iscrizione_id)
+                    if iscrizione and iscrizione.stato == "in_abilitazione":
+                        wordpress_user = session.query(WordpressUser).filter_by(
+                            iscrizioni_id=iscrizione.id
+                        ).first()
+                        iscrizione.stato = (
+                            "failed_post" if wordpress_user else "failed_user"
+                        )
+                logger.error(
+                    "JobWordpress stale fallito job_id=%s iscrizione=%s tipo=%s attempts=%s",
+                    job.id, job.iscrizione_id, job.tipo, job.attempts,
+                )
+
+        iscrizioni_in_corso = session.query(IscrizioneEG).filter_by(
+            stato="in_abilitazione"
+        ).all()
+        for iscrizione in iscrizioni_in_corso:
+            job_attivo = session.query(JobWordpress).filter(
+                JobWordpress.iscrizione_id == iscrizione.id,
+                JobWordpress.stato.in_(["PENDING", "SENDING"]),
+            ).first()
+            if not job_attivo:
+                logger.error(
+                    "Iscrizione in_abilitazione senza job attivo iscrizione=%s regione=%s",
+                    iscrizione.id, iscrizione.regione,
+                )
+        session.commit()
+        return len(stale)
+    except Exception as exc:
+        session.rollback()
+        logger.error("Recovery JobWordpress stale fallito motivo=%s", type(exc).__name__)
+        return 0
+    finally:
+        session.close()
+
+
 def job_wordpress():
     def task():
         scheduler = schedule.Scheduler()
         creds = f"{os.environ['WORDPRESS_USER']}:{os.environ['WORDPRESS_PASSWORD']}"
         token = base64.b64encode(creds.encode())
         header = {"Authorization": f"Basic {token.decode('utf-8')}"}
-        session = Session()
-        try:
-            tmp_jobs = session.query(JobWordpress).filter_by(stato="SENDING")
-            for tmp_job in tmp_jobs:
-                tmp_job.stato = "PENDING"
-            session.commit()
-        except Exception as exc:
-            session.rollback()
-            logger.error(
-                "Ripristino JobWordpress SENDING fallito motivo=%s",
-                type(exc).__name__,
-            )
-        finally:
-            session.close()
+        recupera_job_wordpress_stale()
 
         scheduler.every(10).seconds.do(
             processa_prossimo_job_wordpress, header
         )
+        scheduler.every(1).minutes.do(recupera_job_wordpress_stale)
 
         global demone_wordpress
         while demone_wordpress:

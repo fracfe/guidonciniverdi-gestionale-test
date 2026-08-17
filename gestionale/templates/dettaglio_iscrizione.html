@@ -2,20 +2,15 @@
 {% from "_stato_iscrizione.html" import badge_stato_iscrizione %}
 
 {% block head %}
-
 <title>GV Piemonte - Iscrizioni</title>
-
 {% endblock %}
 
 {% block titolo %}
-
 <h1 class="text-center my-2"><strong>Dettaglio iscrizione {{ iscrizione.id }}</strong></h1>
-
 {% endblock %}
 
 {% block corpo %}
-<div class="mx-4">
-
+<div class="mx-4 mb-4">
   <nav aria-label="breadcrumb">
     <ol class="breadcrumb">
       <li class="breadcrumb-item"><a href="{{ url_for("iscrizioni") }}">Iscrizioni</a></li>
@@ -23,115 +18,133 @@
     </ol>
   </nav>
 
-  <div class="btn-group" role="group">
-  {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
-  <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=iscrizione.id) }}">{% if iscrizione.stato == "failed_user" %}Riprova abilitazione{% else %}Abilita{% endif %}</a>
-  {% endif %}
-  {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
-  <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=iscrizione.id) }}">Modifica</a>
-  {% endif %}
-  {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
-  <a type="button" class="btn btn-outline-danger" href="{{ url_for("elimina", id_iscrizione=iscrizione.id) }}">Scarta</a>
-  {% endif %}
-  {% if iscrizione.stato == "eliminato" %}
-  <a type="button" class="btn btn-outline-success" href="{{ url_for("ripristina", id_iscrizione=iscrizione.id) }}">Ripristina</a>
-    {% if current_user.livello == "admin" %}
-    <a type="button" class="btn btn-outline-danger" href="{{ url_for("elimina_def", id_iscrizione=iscrizione.id) }}">Elimina Definitivamente</a>
-    {% endif %}
-  {% endif %}
-  <a type="button" class="btn btn-outline-primary" href="{{ url_for("export_iscrizione", id_iscrizione=iscrizione.id) }}">Export</a>
-  </div>
-  <div class="table-responsive">
-    <table class="table">
-      <tbody>
-        <tr>
-          <th scope="row">Nome SQ</th>
-          <td>{{ iscrizione.nome }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Sesso</th>
-          {% if iscrizione.sesso == "m" %}
-          <td><span class="badge bg-info">Maschile</span></td>
-          {% elif iscrizione.sesso == "f" %}
-          <td><span class="badge bg-info">Femminile</span></td>
-          {% endif %}
-        </tr>
-        <tr>
-          <th scope="row">Gruppo</th>
-          <td>{{ gruppo.gruppo.capitalize() }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Zona</th>
-          <td>{{ zona.zona.title() }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Ambito</th>
-          <td>{{ iscrizione.specialita }} - {{ iscrizione.tipo.capitalize() }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Stato</th>
-          <td>{{ badge_stato_iscrizione(iscrizione.stato, true) }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Utente WordPress</th>
-          <td>{% if wordpress_user %}<span class="badge bg-success">Presente</span> {{ wordpress_user.username }}{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</td>
-        </tr>
-        <tr>
-          <th scope="row">Pagina WordPress</th>
-          <td>{% if wordpress_post %}<span class="badge bg-success">Presente</span>{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</td>
-        </tr>
-        {% if iscrizione.link %}
-          <tr>
-            <th scope="row">Link Diario di Bordo</th>
-            <td><a href="{{ iscrizione.link }}" rel="noopener noreferrer">{{ iscrizione.link }}</a></td>
-          </tr>
-        {% endif %}
-        {% if iscrizione.regione == "puglia" %}
-          <tr>
-            <th scope="row">Relazione</th>
-            {% if relazione.stato %}
-            <td><span class="badge bg-success">Ricevuta!</span> <a type="button" class="btn btn-sm bg-danger btn-disabled" href="">Elimina Relazione</a></td>
-            {% else %}
-            <td><span class="badge bg-warning">...manca...</span></td>
-            {% endif %}
-          </tr>
-        {% endif %}
-      </tbody>
-    </table>
-  </div>
+  <section class="card mb-3" aria-labelledby="titolo-stato-iscrizione">
+    <div class="card-body">
+      <h2 class="h4" id="titolo-stato-iscrizione">Stato iscrizione</h2>
+      {{ badge_stato_iscrizione(iscrizione.stato, true) }}
+      {% if iscrizione.stato == "in_abilitazione" %}
+      <p class="mb-0 mt-2">La richiesta è stata presa in carico e il sistema sta lavorando in background.</p>
+      {% endif %}
+    </div>
+  </section>
 
-  <div class="table-responsive">
-    <table class="table">
-      <thead>
-        <tr>
-          <th scope="col"></th>
-          <th scope="col">Nome e Cognome</th>
-          <th scope="col">Indirizzo mail</th>
-          <th scope="col">Numero di cellulare</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <th scope="row">Capo squadriglia</th>
-          <td>{{ iscrizione.nome_capo_sq }}</td>
-          <td>{{ iscrizione.mail }}</td>
-          <td></td>
-        </tr>
-        <tr>
-          <th scope="row">Capo Reparto 1</th>
-          <td>{{ iscrizione.nome_capo1 }}</td>
-          <td>{{ iscrizione.mail_capo1 }}</td>
-          <td>{{ iscrizione.cell_capo1 }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Capo Reparto 2</th>
-          <td>{{ iscrizione.nome_capo2 }}</td>
-          <td>{{ iscrizione.mail_capo2 }}</td>
-          <td>{{ iscrizione.cell_capo2 }}</td>
-        </tr>
-      </tbody>
-    </table>
+  <section class="card mb-3" aria-labelledby="titolo-wordpress">
+    <div class="card-body">
+      <h2 class="h4" id="titolo-wordpress">WordPress</h2>
+      <dl class="row mb-2">
+        <dt class="col-sm-4">Stato sincronizzazione</dt>
+        <dd class="col-sm-8">
+          {% if sync_wordpress.codice == "done" %}<span class="badge bg-success">{{ sync_wordpress.testo }}</span>
+          {% elif sync_wordpress.codice == "processing" %}<span class="badge bg-info text-dark">{{ sync_wordpress.testo }}</span>
+          {% elif sync_wordpress.codice == "failed" %}<span class="badge bg-danger">{{ sync_wordpress.testo }}</span>
+          {% else %}<span class="badge bg-secondary">{{ sync_wordpress.testo }}</span>{% endif %}
+          {% if sync_wordpress.job %}
+          <div class="small mt-1">Job #{{ sync_wordpress.job.id }} · {{ sync_wordpress.job.tipo }} · {{ sync_wordpress.job.updated_at }}</div>
+          {% if sync_wordpress.job.last_error %}<div class="small text-danger">{{ sync_wordpress.job.last_error }}</div>{% endif %}
+          {% endif %}
+        </dd>
+        <dt class="col-sm-4">Utente WordPress</dt>
+        <dd class="col-sm-8">{% if wordpress_user %}<span class="badge bg-success">Presente</span>{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</dd>
+        <dt class="col-sm-4">Pagina WordPress</dt>
+        <dd class="col-sm-8">{% if wordpress_post %}<span class="badge bg-success">Presente</span>{% else %}<span class="badge bg-secondary">Non presente</span>{% endif %}</dd>
+        {% if iscrizione.link %}
+        <dt class="col-sm-4">Diario di Bordo</dt>
+        <dd class="col-sm-8"><a href="{{ iscrizione.link }}" rel="noopener noreferrer">{{ iscrizione.link }}</a></dd>
+        {% endif %}
+      </dl>
+
+      {% if sync_wordpress.codice == "failed" %}
+      <form method="post" action="{{ url_for("retry_sync", id_iscrizione=iscrizione.id) }}" class="d-inline-block me-2">
+        <button type="submit" class="btn btn-outline-warning">Riprova sincronizzazione</button>
+      </form>
+      {% endif %}
+      {% if iscrizione.stato == "failed_post" %}
+      <form method="post" action="{{ url_for("retry_post", id_iscrizione=iscrizione.id) }}" class="d-inline-block">
+        <button type="submit" class="btn btn-outline-warning">Riprova creazione pagina</button>
+      </form>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card mb-3" aria-labelledby="titolo-credenziali-wordpress">
+    <div class="card-body">
+      <h2 class="h4" id="titolo-credenziali-wordpress">Credenziali WordPress</h2>
+      {% if wordpress_user %}
+      <dl class="row">
+        <dt class="col-sm-4">Username</dt>
+        <dd class="col-sm-8">{{ wordpress_user.username }}</dd>
+        <dt class="col-sm-4">Password corrente</dt>
+        <dd class="col-sm-8">{{ wordpress_user.password }}</dd>
+      </dl>
+      <a class="btn btn-outline-primary" href="{{ url_for("reset_password_wordpress", id_iscrizione=iscrizione.id) }}">Reimposta password</a>
+      {% else %}
+      <p class="mb-0">Le credenziali non sono ancora disponibili.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card mb-3" aria-labelledby="titolo-dati-iscrizione">
+    <div class="card-body">
+      <h2 class="h4" id="titolo-dati-iscrizione">Dati iscrizione</h2>
+      <div class="table-responsive">
+        <table class="table">
+          <tbody>
+            <tr><th scope="row">Nome squadriglia</th><td>{{ iscrizione.nome }}</td></tr>
+            <tr>
+              <th scope="row">Sesso</th>
+              <td>{% if iscrizione.sesso == "m" %}<span class="badge bg-info">Maschile</span>{% elif iscrizione.sesso == "f" %}<span class="badge bg-info">Femminile</span>{% endif %}</td>
+            </tr>
+            <tr><th scope="row">Gruppo</th><td>{{ gruppo.gruppo.capitalize() }}</td></tr>
+            <tr><th scope="row">Zona</th><td>{{ zona.zona.title() }}</td></tr>
+            <tr><th scope="row">Ambito</th><td>{{ iscrizione.specialita }} - {{ iscrizione.tipo.capitalize() }}</td></tr>
+            {% if iscrizione.regione == "puglia" %}
+            <tr>
+              <th scope="row">Relazione</th>
+              {% if relazione.stato %}
+              <td><span class="badge bg-success">Ricevuta!</span> <a class="btn btn-sm bg-danger btn-disabled" href="">Elimina Relazione</a></td>
+              {% else %}
+              <td><span class="badge bg-warning">...manca...</span></td>
+              {% endif %}
+            </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="h5 mt-3">Contatti</h3>
+      <div class="table-responsive">
+        <table class="table">
+          <thead>
+            <tr><th scope="col"></th><th scope="col">Nome e Cognome</th><th scope="col">Indirizzo mail</th><th scope="col">Numero di cellulare</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Capo squadriglia</th><td>{{ iscrizione.nome_capo_sq }}</td><td>{{ iscrizione.mail }}</td><td></td></tr>
+            <tr><th scope="row">Capo Reparto 1</th><td>{{ iscrizione.nome_capo1 }}</td><td>{{ iscrizione.mail_capo1 }}</td><td>{{ iscrizione.cell_capo1 }}</td></tr>
+            <tr><th scope="row">Capo Reparto 2</th><td>{{ iscrizione.nome_capo2 }}</td><td>{{ iscrizione.mail_capo2 }}</td><td>{{ iscrizione.cell_capo2 }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="d-flex flex-wrap gap-2">
+        {% if iscrizione.stato in ["da_abilitare", "failed_user", "failed_post", "abilitato"] and sync_wordpress.codice != "processing" %}
+        <a class="btn btn-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=iscrizione.id) }}">Modifica iscrizione</a>
+        {% endif %}
+        <a class="btn btn-outline-primary" href="{{ url_for("export_iscrizione", id_iscrizione=iscrizione.id) }}">Export</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="d-flex flex-wrap gap-2">
+    {% if iscrizione.stato in ["da_abilitare", "failed_user"] %}
+    <a class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=iscrizione.id) }}">{% if iscrizione.stato == "failed_user" %}Riprova abilitazione{% else %}Abilita{% endif %}</a>
+    <a class="btn btn-outline-danger" href="{{ url_for("elimina", id_iscrizione=iscrizione.id) }}">Scarta</a>
+    {% endif %}
+    {% if iscrizione.stato == "eliminato" %}
+    <a class="btn btn-outline-success" href="{{ url_for("ripristina", id_iscrizione=iscrizione.id) }}">Ripristina</a>
+    {% if current_user.livello == "admin" %}
+    <a class="btn btn-outline-danger" href="{{ url_for("elimina_def", id_iscrizione=iscrizione.id) }}">Elimina definitivamente</a>
+    {% endif %}
+    {% endif %}
   </div>
 </div>
-
 {% endblock %}

@@ -18,6 +18,7 @@ import io
 import os
 from weasyprint import HTML
 from pypdf import PdfReader, PdfWriter
+from shared.mail_riepilogo import genera_mail_riepilogo_iscrizione
 
 # costanti varie
 specialita = [
@@ -168,6 +169,20 @@ class JobWordpress(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     data = db.Column(db.DateTime, nullable=False)
     stato = db.Column(db.String(255), nullable=False)
+    tipo = db.Column(db.String(255), nullable=False, default="crea_sq")
+    iscrizione_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "iscrizioni_eg.id",
+            name="fk_job_wordpress_iscrizioni_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    started_at = db.Column(db.DateTime, nullable=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_error = db.Column(db.Text, nullable=True)
     dati = db.Column(db.JSON, nullable=False)
 
 
@@ -187,18 +202,31 @@ def accoda_creazione_squadriglia(iscrizione_id, username, meta):
     if not iscrizione_acquisita:
         return False
 
-    job_attivo = any(
-        job.dati.get("tipo") == "crea_sq"
-        and job.dati.get("iscrizione") == iscrizione_id
-        for job in JobWordpress.query.filter(
-            JobWordpress.stato.in_(["PENDING", "SENDING"])
+    job_attivo = JobWordpress.query.filter(
+        JobWordpress.iscrizione_id == iscrizione_id,
+        JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+    ).first()
+    if not job_attivo:
+        job_attivo = next(
+            (
+                job
+                for job in JobWordpress.query.filter(
+                    JobWordpress.iscrizione_id.is_(None),
+                    JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+                )
+                if isinstance(job.dati, dict)
+                and job.dati.get("iscrizione") == iscrizione_id
+            ),
+            None,
         )
-    )
     if not job_attivo:
         db.session.add(
             JobWordpress(
                 data=datetime.now(),
                 stato="PENDING",
+                tipo="crea_sq",
+                iscrizione_id=iscrizione_id,
+                updated_at=datetime.now(),
                 dati={
                     "iscrizione": iscrizione_id,
                     "tipo": "crea_sq",
@@ -220,6 +248,132 @@ def conteggia_stati_iscrizioni(query):
         ).count(),
         "eliminate": query.filter_by(stato="eliminato").count(),
     }
+
+
+STATI_ISCRIZIONE_MODIFICABILI = {
+    "da_abilitare", "failed_user", "failed_post", "abilitato"
+}
+STATI_JOB_ATTIVI = {"PENDING", "SENDING"}
+CAMPI_WORDPRESS = {"nome", "zona", "gruppo", "specialita", "tipo"}
+WORDPRESS_TIMEOUT = (5, 30)
+
+
+def puo_gestire_iscrizione(utente, iscrizione):
+    if not iscrizione:
+        return False
+    if utente.livello == "admin":
+        return True
+    if utente.livello == "iabr":
+        return iscrizione.regione == utente.regione
+    if utente.livello == "iabz":
+        return (
+            iscrizione.regione == utente.regione
+            and iscrizione.zona == utente.zona
+        )
+    return False
+
+
+def job_wordpress_attivo(iscrizione_id, blocca=False):
+    query = JobWordpress.query.filter(
+        JobWordpress.iscrizione_id == iscrizione_id,
+        JobWordpress.stato.in_(STATI_JOB_ATTIVI),
+    ).order_by(JobWordpress.id.desc())
+    if blocca:
+        query = query.with_for_update()
+    return query.first()
+
+
+def meta_wordpress_iscrizione(iscrizione):
+    gruppo = db.session.get(Gruppo, iscrizione.gruppo)
+    zona = db.session.get(Zona, iscrizione.zona)
+    regione = db.session.get(Regione, iscrizione.regione)
+    percorso = db.session.get(StatusPercorso, iscrizione.anno_percorso)
+    if not all([gruppo, zona, regione, percorso]):
+        raise ValueError("dati territoriali o percorso non validi")
+    return {
+        "anno": percorso.anno,
+        "gruppo": gruppo.gruppo.capitalize(),
+        "rinnovo": iscrizione.tipo != "conquista",
+        "specialita": iscrizione.specialita.title(),
+        "squadriglia": iscrizione.nome.capitalize(),
+        "regione": regione.regione.capitalize(),
+        "zona": zona.zona.removeprefix("ZONA ").title(),
+    }
+
+
+def stato_sincronizzazione_wordpress(iscrizione, wordpress_user, wordpress_post):
+    ultimo_job = JobWordpress.query.filter_by(
+        iscrizione_id=iscrizione.id
+    ).order_by(JobWordpress.id.desc()).first()
+    if ultimo_job and ultimo_job.stato in STATI_JOB_ATTIVI:
+        return {"codice": "processing", "testo": "Aggiornamento in corso", "job": ultimo_job}
+    if ultimo_job and ultimo_job.stato == "FAILED" and ultimo_job.tipo == "update_sq":
+        return {"codice": "failed", "testo": "Errore di sincronizzazione", "job": ultimo_job}
+    if iscrizione.stato == "abilitato" and wordpress_user and wordpress_post:
+        return {"codice": "done", "testo": "Sincronizzato", "job": ultimo_job}
+    return {"codice": "none", "testo": "Non sincronizzato", "job": ultimo_job}
+
+
+def richiesta_wordpress_reset_password(wordpress_id, nuova_password):
+    configurazione = [
+        os.environ.get("WORDPRESS_URL"),
+        os.environ.get("WORDPRESS_USER"),
+        os.environ.get("WORDPRESS_PASSWORD"),
+    ]
+    if not all(configurazione):
+        raise RuntimeError("configurazione WordPress non disponibile")
+    endpoint = f"/users/{wordpress_id}"
+    url = f"{configurazione[0].rstrip('/')}{endpoint}"
+    response = requests.post(
+        url,
+        json={"password": nuova_password},
+        auth=(configurazione[1], configurazione[2]),
+        timeout=WORDPRESS_TIMEOUT,
+    )
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"WordPress HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("risposta WordPress non valida") from exc
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("id")) is not int
+        or payload.get("id") != wordpress_id
+    ):
+        raise RuntimeError("risposta WordPress inattesa")
+
+
+def accoda_mail_riepilogo(iscrizione_id, operazione="modifica"):
+    iscrizione = db.session.get(IscrizioneEG, iscrizione_id)
+    if not iscrizione:
+        raise ValueError("iscrizione non disponibile per il riepilogo")
+    regione = db.session.get(Regione, iscrizione.regione)
+    zona = db.session.get(Zona, iscrizione.zona)
+    gruppo = db.session.get(Gruppo, iscrizione.gruppo)
+    percorso = db.session.get(StatusPercorso, iscrizione.anno_percorso)
+    wordpress_user = WordpressUser.query.filter_by(
+        iscrizioni_id=iscrizione_id
+    ).first()
+    if not all([iscrizione, regione, zona, gruppo, percorso]):
+        raise ValueError("dati riepilogo iscrizione non disponibili")
+    riepilogo = genera_mail_riepilogo_iscrizione(
+        iscrizione,
+        regione,
+        zona,
+        gruppo,
+        percorso,
+        wordpress_user=wordpress_user,
+        operazione=operazione,
+    )
+    manda_mail(
+        riepilogo["destinatari"],
+        riepilogo["copia"],
+        riepilogo["oggetto"],
+        riepilogo["html"],
+        regione=iscrizione.regione,
+        anno=riepilogo["anno"],
+    )
 
 class StatusPercorso(db.Model):
     __tablename__ = "status_percorso"
@@ -303,8 +457,17 @@ def crea_regione(template_id):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-def manda_mail(indirizzi, copia, titolo, testo, regione):
-    db.session.add(CodaMail(data=datetime.now(), stato="PENDING", regione=regione, indirizzi=indirizzi, indirizzi_copia=copia, titolo=f"Guidoncini Verdi {SysOption.query.filter_by(key='AnnoCorrente').first().value} - {titolo}", testo=testo))
+def manda_mail(indirizzi, copia, titolo, testo, regione, anno=None):
+    anno_mail = anno or SysOption.query.filter_by(key="AnnoCorrente").first().value
+    db.session.add(CodaMail(
+        data=datetime.now(),
+        stato="PENDING",
+        regione=regione,
+        indirizzi=indirizzi,
+        indirizzi_copia=copia,
+        titolo=f"Guidoncini Verdi {anno_mail} - {titolo}",
+        testo=testo,
+    ))
     db.session.commit()
     return True
 
@@ -484,22 +647,19 @@ def report():
 @app.route("/dettagli/<id_iscrizione>")
 @login_required
 def dettagli(id_iscrizione):
-    tmp_iscrizione = IscrizioneEG.query.filter_by(id=int(id_iscrizione)).first()
+    tmp_iscrizione = db.session.get(IscrizioneEG, int(id_iscrizione))
+    if not puo_gestire_iscrizione(current_user, tmp_iscrizione):
+        flash("Non hai i permessi per consultare questa iscrizione.", "warning")
+        return redirect(url_for("iscrizioni"))
     tmp_gruppo = Gruppo.query.filter_by(id=tmp_iscrizione.gruppo).first()
     tmp_zona = Zona.query.filter_by(id=tmp_iscrizione.zona).first()
-    try:
-        relazione = RelazioniPuglia.query.filter_by(iscrizioni_id=int(id_iscrizione)).first()
-    except:
-        relazione = False
-    try:
-        wordpress_user = WordpressUser.query.filter_by(iscrizioni_id=int(id_iscrizione)).first()
-    except:
-        wordpress_user = False
-    try:
-        wordpress_post = WordpressPost.query.filter_by(iscrizioni_id=int(id_iscrizione), tipo="posts").first()
-    except:
-        wordpress_post = False
-    return render_template("dettaglio_iscrizione.html", iscrizione=tmp_iscrizione, gruppo=tmp_gruppo, zona=tmp_zona, relazione=relazione, wordpress_user=wordpress_user, wordpress_post=wordpress_post)
+    relazione = RelazioniPuglia.query.filter_by(iscrizioni_id=int(id_iscrizione)).first()
+    wordpress_user = WordpressUser.query.filter_by(iscrizioni_id=int(id_iscrizione)).first()
+    wordpress_post = WordpressPost.query.filter_by(iscrizioni_id=int(id_iscrizione), tipo="posts").first()
+    sync_wordpress = stato_sincronizzazione_wordpress(
+        tmp_iscrizione, wordpress_user, wordpress_post
+    )
+    return render_template("dettaglio_iscrizione.html", iscrizione=tmp_iscrizione, gruppo=tmp_gruppo, zona=tmp_zona, relazione=relazione, wordpress_user=wordpress_user, wordpress_post=wordpress_post, sync_wordpress=sync_wordpress)
 
 @app.route("/elimina/<id_iscrizione>")
 @login_required
@@ -553,32 +713,65 @@ def ripristina(id_iscrizione):
 @app.route("/edit/<id_iscrizione>", methods=["GET", "POST"])
 @login_required
 def edit_iscrizione(id_iscrizione):
-    if (current_user.livello != "iabr") and (current_user.livello != "admin"):
-        return redirect(url_for("dashboard"))
-    iscrizione=IscrizioneEG.query.filter_by(id=int(id_iscrizione)).first()
-    gruppi = Gruppo.query.filter_by(regione=iscrizione.regione)
-    zone = Zona.query.filter_by(regione=iscrizione.regione)
-    json_gruppi = {}
-    for i in zone:
-        json_gruppi[i.zona.upper()] = []
-    for i in gruppi:
-        json_gruppi[Zona.query.filter_by(id=i.zona).first().zona.upper()].append(i.gruppo.upper())
-    try:
-        if iscrizione.stato not in ["da_abilitare", "failed_user"]:
-            flash("Questa iscrizione non può essere modificata nello stato attuale.", "warning")
-            return redirect(url_for("iscrizioni"))
-    except:
+    iscrizione = db.session.get(IscrizioneEG, int(id_iscrizione))
+    if not iscrizione:
         flash("Non ho trovato l'iscrizione!", "warning")
         return redirect(url_for("iscrizioni"))
+    if not puo_gestire_iscrizione(current_user, iscrizione):
+        flash("Non hai i permessi per modificare questa iscrizione.", "warning")
+        return redirect(url_for("iscrizioni"))
+    if iscrizione.stato not in STATI_ISCRIZIONE_MODIFICABILI:
+        messaggio = "Questa iscrizione non può essere modificata nello stato attuale."
+        if iscrizione.stato == "in_abilitazione":
+            messaggio = "L'abilitazione è in corso: la modifica è temporaneamente bloccata."
+        flash(messaggio, "warning")
+        return redirect(url_for("iscrizioni"))
+    if job_wordpress_attivo(iscrizione.id):
+        flash("È già in corso un'operazione WordPress per questa iscrizione.", "warning")
+        return redirect(url_for("dettagli", id_iscrizione=iscrizione.id))
+
     if request.method == "POST":
         try:
-            iscrizione.nome = request.form["nome_squadriglia"].capitalize()
+            iscrizione = IscrizioneEG.query.filter_by(
+                id=int(id_iscrizione)
+            ).with_for_update().first()
+            if not puo_gestire_iscrizione(current_user, iscrizione):
+                raise PermissionError("competenza non valida")
+            if iscrizione.stato not in STATI_ISCRIZIONE_MODIFICABILI:
+                raise ValueError("stato non modificabile")
+            if job_wordpress_attivo(iscrizione.id, blocca=True):
+                raise RuntimeError("job WordPress già attivo")
+
+            zona_id = int(request.form["zona"])
+            gruppo_id = int(request.form["gruppo"])
+            zona = Zona.query.filter_by(id=zona_id, regione=iscrizione.regione).first()
+            gruppo = Gruppo.query.filter_by(
+                id=gruppo_id, zona=zona_id, regione=iscrizione.regione
+            ).first()
+            if not zona or not gruppo:
+                raise ValueError("zona o gruppo non coerenti")
+            if zona_id != iscrizione.zona and request.form.get("conferma_trasferimento") != "1":
+                raise ValueError("trasferimento zona non confermato")
+
+            sesso = request.form["tipo_sq"]
+            tipo = request.form["conquista_conferma"]
+            nuova_specialita = request.form["specialita"]
+            if sesso not in ["m", "f"] or tipo not in ["conquista", "conferma"]:
+                raise ValueError("valore form non valido")
+            if nuova_specialita not in specialita:
+                raise ValueError("specialità non valida")
+
+            precedenti_wordpress = {
+                campo: getattr(iscrizione, campo) for campo in CAMPI_WORDPRESS
+            }
+            stato_originale = iscrizione.stato
+            iscrizione.nome = request.form["nome_squadriglia"].strip()
             iscrizione.mail = request.form["mail_squadriglia"]
-            iscrizione.zona = request.form["zona"]
-            iscrizione.sesso = request.form["tipo_sq"]
-            iscrizione.gruppo = request.form["gruppo"]
-            iscrizione.specialita = request.form["specialita"]
-            iscrizione.tipo = request.form["conquista_conferma"]
+            iscrizione.zona = zona_id
+            iscrizione.sesso = sesso
+            iscrizione.gruppo = gruppo_id
+            iscrizione.specialita = nuova_specialita
+            iscrizione.tipo = tipo
             iscrizione.nome_capo_sq = request.form["nome_capo_squadriglia"]
             iscrizione.nome_capo1 = request.form["nome_capo_rep1"]
             iscrizione.mail_capo1 = request.form["mail_rep1"]
@@ -586,23 +779,210 @@ def edit_iscrizione(id_iscrizione):
             iscrizione.nome_capo2 = request.form["nome_capo_rep2"]
             iscrizione.mail_capo2 = request.form["mail_rep2"]
             iscrizione.cell_capo2 = request.form["numero_rep2"]
+
+            modifiche_wordpress = any(
+                precedenti_wordpress[campo] != getattr(iscrizione, campo)
+                for campo in CAMPI_WORDPRESS
+            )
+            job_update = stato_originale == "abilitato" and modifiche_wordpress
+            if job_update:
+                wordpress_user = WordpressUser.query.filter_by(
+                    iscrizioni_id=iscrizione.id
+                ).first()
+                if not wordpress_user:
+                    raise ValueError("utente WordPress locale non presente")
+                adesso = datetime.now()
+                db.session.add(JobWordpress(
+                    data=adesso,
+                    stato="PENDING",
+                    tipo="update_sq",
+                    iscrizione_id=iscrizione.id,
+                    updated_at=adesso,
+                    dati={"iscrizione": iscrizione.id, "tipo": "update_sq"},
+                ))
             db.session.commit()
-        except:
-            flash("Modifica Iscrizione fallita. Riprovaci!", "warning")
+        except (KeyError, TypeError, ValueError, PermissionError, RuntimeError) as exc:
+            db.session.rollback()
+            app.logger.warning("Modifica iscrizione rifiutata iscrizione_id=%s motivo=%s", id_iscrizione, str(exc))
+            flash("Modifica non salvata: controlla i dati e riprova.", "warning")
+            return redirect(url_for("edit_iscrizione", id_iscrizione=id_iscrizione))
+        except Exception as exc:
+            db.session.rollback()
+            app.logger.error("Modifica iscrizione fallita iscrizione_id=%s motivo=%s", id_iscrizione, type(exc).__name__)
+            flash("Modifica iscrizione fallita. Riprova.", "warning")
             return redirect(url_for("iscrizioni"))
 
-        testo_mail_sq = f"Carə {iscrizione.nome},<br>la vostra iscrizione al percorso Guidoncini Verdi {SysOption.query.filter_by(key='AnnoCorrente').first().value} è stata modificata come richiesto.<br><h4><strong>Dettagli Iscrizione</strong></h4>Zona: {iscrizione.zona}<br>Gruppo: {iscrizione.gruppo}<br>Ambito scelto: {iscrizione.specialita} - {iscrizione.tipo.capitalize()}"
-        manda_mail([iscrizione.mail], [iscrizione.mail_capo1, iscrizione.mail_capo2], "Modifica iscrizione", testo_mail_sq, regione=iscrizione.regione)
+        if not job_update:
+            try:
+                accoda_mail_riepilogo(iscrizione.id)
+            except Exception as exc:
+                db.session.rollback()
+                app.logger.error("Accodamento mail modifica fallito iscrizione_id=%s motivo=%s", iscrizione.id, type(exc).__name__)
+                flash("Dati salvati, ma la mail di conferma non è stata accodata.", "warning")
+            else:
+                flash("Modifiche salvate correttamente.", "success")
+        else:
+            flash("Modifiche salvate. Aggiornamento WordPress in corso.", "success")
+        return redirect(url_for("dettagli", id_iscrizione=iscrizione.id))
 
-        # Avvisa Francesco e Admin
-        try:
-            testo_telegram = f"Squadriglia {iscrizione.nome}\n{iscrizione.gruppo} - {iscrizione.zona}\nAmbito\n{iscrizione.specialita} - {iscrizione.tipo.capitalize()}"
-            manda_telegram(User.query.filter_by(username="egm").first().telegram_id, "Modifica Iscrizione", testo_telegram)
-            manda_telegram(User.query.filter_by(username="admin").first().telegram_id, "Modifica Iscrizione", testo_telegram)
-        except:
-            print("Errore Telegram")
+    zone = Zona.query.filter_by(regione=iscrizione.regione).order_by(Zona.zona).all()
+    gruppi = Gruppo.query.filter_by(regione=iscrizione.regione).order_by(Gruppo.gruppo).all()
+    gruppi_per_zona = {str(zona.id): [] for zona in zone}
+    for gruppo in gruppi:
+        gruppi_per_zona[str(gruppo.zona)].append({"id": gruppo.id, "nome": gruppo.gruppo})
+    return render_template("edit_iscrizione.html", iscrizione=iscrizione, zone=zone, gruppi=gruppi_per_zona, specialita=specialita)
+
+
+@app.route("/retry_post/<int:id_iscrizione>", methods=["POST"])
+@login_required
+def retry_post(id_iscrizione):
+    try:
+        iscrizione = IscrizioneEG.query.filter_by(
+            id=id_iscrizione
+        ).with_for_update().first()
+        if not puo_gestire_iscrizione(current_user, iscrizione):
+            raise PermissionError("competenza non valida")
+        if iscrizione.stato != "failed_post":
+            raise ValueError("stato non valido per il retry pagina")
+        if job_wordpress_attivo(iscrizione.id, blocca=True):
+            raise RuntimeError("job WordPress già attivo")
+        wordpress_user = WordpressUser.query.filter_by(
+            iscrizioni_id=iscrizione.id
+        ).first()
+        if not wordpress_user:
+            raise ValueError("utente WordPress locale non presente")
+        meta = meta_wordpress_iscrizione(iscrizione)
+        adesso = datetime.now()
+        iscrizione.stato = "in_abilitazione"
+        db.session.add(JobWordpress(
+            data=adesso,
+            stato="PENDING",
+            tipo="crea_sq",
+            iscrizione_id=iscrizione.id,
+            updated_at=adesso,
+            dati={
+                "iscrizione": iscrizione.id,
+                "tipo": "crea_sq",
+                "username": wordpress_user.username,
+                "meta": meta,
+            },
+        ))
+        db.session.commit()
+        flash("Nuovo tentativo di creazione pagina accodato.", "success")
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        db.session.rollback()
+        app.logger.warning("Retry pagina rifiutato iscrizione_id=%s motivo=%s", id_iscrizione, str(exc))
+        flash("Non è possibile riprovare la creazione della pagina.", "warning")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error("Retry pagina fallito iscrizione_id=%s motivo=%s", id_iscrizione, type(exc).__name__)
+        flash("Errore durante l'accodamento del nuovo tentativo.", "warning")
+    return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
+
+
+@app.route("/retry_sync/<int:id_iscrizione>", methods=["POST"])
+@login_required
+def retry_sync(id_iscrizione):
+    try:
+        iscrizione = IscrizioneEG.query.filter_by(
+            id=id_iscrizione
+        ).with_for_update().first()
+        if not puo_gestire_iscrizione(current_user, iscrizione):
+            raise PermissionError("competenza non valida")
+        if iscrizione.stato != "abilitato":
+            raise ValueError("iscrizione non abilitata")
+        if job_wordpress_attivo(iscrizione.id, blocca=True):
+            raise RuntimeError("job WordPress già attivo")
+        ultimo = JobWordpress.query.filter_by(
+            iscrizione_id=iscrizione.id, tipo="update_sq"
+        ).order_by(JobWordpress.id.desc()).first()
+        if not ultimo or ultimo.stato != "FAILED":
+            raise ValueError("l'ultima sincronizzazione non è fallita")
+        adesso = datetime.now()
+        db.session.add(JobWordpress(
+            data=adesso,
+            stato="PENDING",
+            tipo="update_sq",
+            iscrizione_id=iscrizione.id,
+            updated_at=adesso,
+            dati={"iscrizione": iscrizione.id, "tipo": "update_sq"},
+        ))
+        db.session.commit()
+        flash("Nuova sincronizzazione WordPress accodata.", "success")
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        db.session.rollback()
+        app.logger.warning("Retry sincronizzazione rifiutato iscrizione_id=%s motivo=%s", id_iscrizione, str(exc))
+        flash("Non è possibile riprovare la sincronizzazione.", "warning")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error("Retry sincronizzazione fallito iscrizione_id=%s motivo=%s", id_iscrizione, type(exc).__name__)
+        flash("Errore durante l'accodamento della sincronizzazione.", "warning")
+    return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
+
+
+@app.route("/reset_password_wordpress/<int:id_iscrizione>", methods=["GET", "POST"])
+@login_required
+def reset_password_wordpress(id_iscrizione):
+    iscrizione = db.session.get(IscrizioneEG, id_iscrizione)
+    if not puo_gestire_iscrizione(current_user, iscrizione):
+        flash("Non hai i permessi per reimpostare questa password.", "warning")
         return redirect(url_for("iscrizioni"))
-    return render_template("edit_iscrizione.html", iscrizione=iscrizione, gruppi=json_gruppi, specialita=specialita)
+    wordpress_user = WordpressUser.query.filter_by(
+        iscrizioni_id=id_iscrizione
+    ).first()
+    if not wordpress_user:
+        flash("Utente WordPress non presente.", "warning")
+        return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
+    gruppo = db.session.get(Gruppo, iscrizione.gruppo)
+    if request.method == "GET":
+        return render_template(
+            "reset_password_wordpress.html",
+            iscrizione=iscrizione,
+            gruppo=gruppo,
+            wordpress_user=wordpress_user,
+        )
+    nuova_password = request.form.get("nuova_password", "")
+    conferma_password = request.form.get("conferma_password", "")
+    if not nuova_password or nuova_password != conferma_password:
+        flash("Le password non coincidono.", "warning")
+        return redirect(url_for("reset_password_wordpress", id_iscrizione=id_iscrizione))
+    try:
+        richiesta_wordpress_reset_password(
+            wordpress_user.wordpress_id, nuova_password
+        )
+    except (requests.RequestException, RuntimeError) as exc:
+        app.logger.error(
+            "Reset password WordPress fallito iscrizione_id=%s username=%s motivo=%s",
+            id_iscrizione,
+            wordpress_user.username,
+            type(exc).__name__,
+        )
+        flash("WordPress non ha confermato il reset: la password precedente è rimasta invariata.", "warning")
+        return redirect(url_for("reset_password_wordpress", id_iscrizione=id_iscrizione))
+    try:
+        wordpress_user.password = nuova_password
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.critical(
+            "Password aggiornata su WordPress ma non nel Gestionale iscrizione_id=%s username=%s motivo=%s",
+            id_iscrizione,
+            wordpress_user.username,
+            type(exc).__name__,
+        )
+        flash("WordPress è stato aggiornato, ma il salvataggio locale è fallito: contatta un amministratore.", "danger")
+        return redirect(url_for("reset_password_wordpress", id_iscrizione=id_iscrizione))
+    try:
+        accoda_mail_riepilogo(id_iscrizione, operazione="reset_password")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error(
+            "Accodamento mail reset password fallito iscrizione_id=%s motivo=%s",
+            id_iscrizione,
+            type(exc).__name__,
+        )
+    flash("Password WordPress aggiornata correttamente.", "success")
+    return redirect(url_for("dettagli", id_iscrizione=id_iscrizione))
 
 @app.route("/export/<id_iscrizione>")
 @login_required
@@ -637,7 +1017,6 @@ def abilita(id_iscrizione):
         return redirect(url_for("iscrizioni"))
     tmp_gruppo = Gruppo.query.filter_by(id=tmp_iscrizione.gruppo).first()
     tmp_zona = Zona.query.filter_by(id=tmp_iscrizione.zona).first()
-    tmp_regione = Regione.query.filter_by(id=tmp_iscrizione.regione).first()
     tmp_username = f"{tmp_iscrizione.nome.strip(' ')}_{tmp_gruppo.gruppo.lower()}".replace(" ", "_").lower()
     if request.method == "POST":
         try:
@@ -650,21 +1029,7 @@ def abilita(id_iscrizione):
     if not valid_username:
         return render_template("abilita.html", iscrizione=tmp_iscrizione, username=tmp_username, valid_username=valid_username)
     if request.method == "POST":
-        if tmp_iscrizione.tipo == "conquista":
-            tmp_rinnovo = False
-        else:
-            tmp_rinnovo = True
-        tmp_specialita = tmp_iscrizione.specialita.title()
-
-        tmp_meta = {
-            "anno": SysOption.query.filter_by(key="AnnoCorrente").first().value,
-            "gruppo": tmp_gruppo.gruppo.capitalize(),
-            "rinnovo": tmp_rinnovo,
-            "specialita": tmp_specialita,
-            "squadriglia": tmp_iscrizione.nome.capitalize(),
-            "regione": tmp_regione.regione.capitalize(),
-            "zona": tmp_zona.zona.removeprefix("ZONA ").title()
-            }
+        tmp_meta = meta_wordpress_iscrizione(tmp_iscrizione)
 
         accoda_creazione_squadriglia(tmp_iscrizione.id, tmp_username, tmp_meta)
         db.session.commit()

@@ -21,6 +21,14 @@ Il gestionale si occupa inoltre dell'invio di mail a ragazzi e capi.
 Generazione file excel delle iscrizioni per tutti i livelli di utenza (nei limiti della stessa).
 
 ### Deploy
+Le immagini del Gestionale e del daemon condividono il package Python `shared`.
+Devono quindi essere costruite usando la radice del repository come contesto:
+
+```bash
+docker build -f gestionale/Dockerfile -t gestionale .
+docker build -f gestionale-daemon/Dockerfile -t gestionale-daemon .
+```
+
 Docker compose: 
 ```yaml
 services:

@@ -19,10 +19,9 @@ jobs:
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
     - name: Build Gestionale Image
-      working-directory: gestionale
       run: |
         docker build . \
-          --file Dockerfile \
+          --file gestionale/Dockerfile \
           --tag ghcr.io/egit-guidoncini-verdi/guidonciniverdi-gestionale:dev
 
     - name: Push Gestionale Image
@@ -43,10 +42,9 @@ jobs:
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       
     - name: Build Gestionale Daemon Image
-      working-directory: gestionale-daemon
       run: |
         docker build . \
-          --file Dockerfile \
+          --file gestionale-daemon/Dockerfile \
           --tag ghcr.io/egit-guidoncini-verdi/guidonciniverdi-gestionale-daemon:dev
 
     - name: Push Gestionale Daemon Image

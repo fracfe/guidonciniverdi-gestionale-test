@@ -23,6 +23,9 @@
   </nav>
 
   <form method="post">
+    <fieldset class="card mb-3">
+      <div class="card-body">
+        <legend class="h4">Dati squadriglia</legend>
           <div class="mb-3">
             <label for="nome_squadriglia" class="form-label">Nome Squadriglia</label>
             <input type="text" class="form-control" id="nome_squadriglia" name="nome_squadriglia" value="{{ iscrizione.nome }}" required>
@@ -30,16 +33,16 @@
 
           <div class="mb-3">
           <select class="form-select" id="tipo_sq" name="tipo_sq" required>
-            <option value="m">Maschile</option>
-            <option value="f">Femminile</option>
+            <option value="m"{% if iscrizione.sesso == "m" %} selected{% endif %}>Maschile</option>
+            <option value="f"{% if iscrizione.sesso == "f" %} selected{% endif %}>Femminile</option>
           </select>
           </div>
 
           <div class="mb-3">
           <label for="zona" class="form-label">Zona</label>
           <select class="form-select" id="zona" name="zona" onchange="updateGruppoOptions()" required>
-            {% for i in gruppi %}
-            <option value="{{ i }}">{{ i }}</option>
+            {% for zona in zone %}
+            <option value="{{ zona.id }}"{% if zona.id == iscrizione.zona %} selected{% endif %}>{{ zona.zona }}</option>
             {% endfor %}
           </select>
           </div>
@@ -48,6 +51,14 @@
           <label for="gruppo" class="form-label">Gruppo</label>
           <select class="form-select" id="gruppo" name="gruppo" required>
           </select>
+          </div>
+
+          <div class="alert alert-warning d-none" id="conferma_trasferimento_box">
+            <p>Stai trasferendo la squadriglia in un'altra zona. Dopo il salvataggio sarà gestita dagli IABZ della nuova zona.</p>
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" value="1" id="conferma_trasferimento" name="conferma_trasferimento">
+              <label class="form-check-label" for="conferma_trasferimento">Confermo il trasferimento di competenza</label>
+            </div>
           </div>
 
           <div class="mb-3">
@@ -84,9 +95,12 @@
           </div>
           </div>
 
-          <hr>
+      </div>
+    </fieldset>
 
-          <h5 class="text-center"><strong>Un pò di contatti!</strong></h5>
+    <fieldset class="card mb-3">
+      <div class="card-body">
+        <legend class="h4">Contatti</legend>
 
           <div class="mb-3">
             <label for="nome_capo_squadriglia" class="form-label">Nome e Cognome Capə squadriglia</label>
@@ -129,23 +143,20 @@
             <input type="text" class="form-control" id="numero_rep2" name="numero_rep2" value="{{ iscrizione.cell_capo2 }}">
           </div>
 
-    <button type="submit" class="btn btn-primary">Modifica</button>
+      </div>
+    </fieldset>
+
+    <button type="submit" class="btn btn-primary">Salva modifiche</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for("dettagli", id_iscrizione=iscrizione.id) }}">Annulla</a>
   </form>
 
     <script type="text/javascript">
-    var gruppi = {{ gruppi|tojson }}
-    var tmp_zona = "{{ iscrizione.zona }}"
-    var tmp_gruppo = "{{ iscrizione.gruppo }}"
+    var gruppi = {{ gruppi|tojson }};
+    var tmp_zona = "{{ iscrizione.zona }}";
+    var tmp_gruppo = "{{ iscrizione.gruppo }}";
 
     var zonaSelect = document.getElementById("zona");
     var gruppoSelect = document.getElementById("gruppo");
-
-    for (var i = 0; i < zonaSelect.options.length; i++) {
-        if (zonaSelect.options[i].value === tmp_zona) {
-            zonaSelect.selectedIndex = i;
-            break;
-        }
-    }
 
     updateGruppoOptions();
 
@@ -165,12 +176,21 @@
         gruppoSelect.innerHTML = "";
 
         // Aggiungi solo le opzioni correlate alla scelta della Zona
-        var selectedZona = zonaSelect.options[zonaSelect.selectedIndex].value;
+        var selectedZona = zonaSelect.value;
         for (var i in gruppi[selectedZona]) {
             var option = document.createElement("option");
-            option.value = gruppi[selectedZona][i];
-            option.text = gruppi[selectedZona][i];
+            option.value = gruppi[selectedZona][i].id;
+            option.text = gruppi[selectedZona][i].nome;
             gruppoSelect.add(option);
+        }
+        if (selectedZona === tmp_zona) {
+            gruppoSelect.value = tmp_gruppo;
+        }
+        var trasferimento = selectedZona !== tmp_zona;
+        document.getElementById("conferma_trasferimento_box").classList.toggle("d-none", !trasferimento);
+        document.getElementById("conferma_trasferimento").required = trasferimento;
+        if (!trasferimento) {
+            document.getElementById("conferma_trasferimento").checked = false;
         }
     }
 

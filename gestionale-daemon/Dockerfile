@@ -4,11 +4,14 @@ ENV TZ=Europe/Rome
 
 WORKDIR /daemon
 
-COPY ./requirements.txt ./requirements.txt
+ENV PYTHONPATH=/
+
+COPY ./gestionale-daemon/requirements.txt ./requirements.txt
 
 RUN pip install -r requirements.txt
 
-COPY ./daemon.py ./daemon.py
-COPY ./mail_base.html ./mail_base.html
+COPY ./shared /shared
+COPY ./gestionale-daemon/daemon.py ./daemon.py
+COPY ./gestionale-daemon/mail_base.html ./mail_base.html
 
 CMD ["python","daemon.py"]

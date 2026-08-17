@@ -176,7 +176,11 @@
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
             {% if i[0]["stato"] == "failed_user" %}
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Riprova abilitazione</a>
+            {% endif %}
+            {% if i[0]["stato"] in ["failed_user", "failed_post"] %}
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
+            {% endif %}
+            {% if i[0]["stato"] == "failed_user" %}
             <a type="button" class="btn btn-outline-danger" href="{{ url_for("elimina", id_iscrizione=i[0]["id"]) }}">Scarta</a>
             {% endif %}
           </div>
@@ -228,6 +232,7 @@
           <td>
           <div class="btn-group" role="group">
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("dettagli", id_iscrizione=i[0]["id"]) }}">Dettagli</a>
+            <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
           </div>
           </td>
         </tr>
@@ -281,7 +286,7 @@
             {% elif i[0]["stato"] == "failed_user" %}
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("abilita", id_iscrizione=i[0]["id"]) }}">Riprova abilitazione</a>
             {% endif %}
-            {% if i[0]["stato"] in ["da_abilitare", "failed_user"] %}
+            {% if i[0]["stato"] in ["da_abilitare", "failed_user", "failed_post", "abilitato"] %}
             <a type="button" class="btn btn-outline-primary" href="{{ url_for("edit_iscrizione", id_iscrizione=i[0]["id"]) }}">Modifica</a>
             {% endif %}
             {% if i[0]["stato"] in ["da_abilitare", "failed_user"] %}
