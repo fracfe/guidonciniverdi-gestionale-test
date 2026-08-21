@@ -1,0 +1,57 @@
+name: gv-gestionale-tests
+
+services:
+  test-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: gv_automated_test
+      MARIADB_USER: gv_automated_test
+      MARIADB_PASSWORD: gv_automated_test
+      MARIADB_ROOT_PASSWORD: gv_automated_test_root
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping --host=127.0.0.1 --user=root --password=$$MARIADB_ROOT_PASSWORD --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    tmpfs:
+      - /var/lib/mysql
+    networks:
+      - gestionale-tests-network
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      test-db:
+        condition: service_healthy
+    environment:
+      DB_TYPE: mariadb
+      DB_HOST: test-db
+      DB_PORT: "3306"
+      DB_NAME: gv_automated_test
+      DB_USER: gv_automated_test
+      DB_PASSWORD: gv_automated_test
+      SECRET_KEY: test-only-secret
+      TELEGRAM_ENABLED: "false"
+      TELEGRAM_TOKEN: ""
+      MAIL_HOST: mail.invalid
+      MAIL_PORT: "1025"
+      MAIL_USERNAME: test-only
+      MAIL_PASSWORD: test-only
+      WORDPRESS_URL: http://wordpress.invalid
+      WORDPRESS_USER: test-only
+      WORDPRESS_PASSWORD: test-only
+      PYTHONPATH: /app
+      FLASK_APP: app.py
+    entrypoint: ["/app/tests/bin/container-test.sh"]
+    working_dir: /app
+    volumes:
+      - .:/app
+    networks:
+      - gestionale-tests-network
+
+networks:
+  gestionale-tests-network:
+    driver: bridge
