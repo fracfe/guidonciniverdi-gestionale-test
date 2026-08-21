@@ -989,7 +989,7 @@ def processa_job_crea_squadriglia(session, tmp_job, header, contesto):
             "meta": meta_provisioning,
             "specialita": [id_specialita],
             "title": f"{tmp_job.dati['meta']['squadriglia']}",
-            "status": "publish",
+            "status": "draft",
         }
         id_post = crea_post(
             session, id_iscrizione, int(id_autore), header, dati_post, "posts"

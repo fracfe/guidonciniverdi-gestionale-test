@@ -250,10 +250,24 @@ class WorkerWordpressTest(unittest.TestCase):
             mock_post.call_args_list[1].kwargs["json"]["meta"]["gv_iscrizione_id"],
             2,
         )
-        self.assertEqual(
-            mock_post.call_args_list[2].kwargs["json"]["meta"]["gv_iscrizione_id"],
-            2,
-        )
+        chiamata_post = mock_post.call_args_list[2]
+        self.assertIn("/posts", chiamata_post.args[0])
+        payload_post = chiamata_post.kwargs["json"]
+        self.assertEqual(payload_post["status"], "draft")
+        self.assertEqual(payload_post["author"], 20)
+        self.assertEqual(payload_post["categories"], [50])
+        self.assertEqual(payload_post["specialita"], [40])
+        self.assertEqual(payload_post["content"], "Template")
+        self.assertEqual(payload_post["title"], "Squadriglia 2")
+        self.assertEqual(payload_post["meta"]["gv_iscrizione_id"], 2)
+        self.assertEqual(payload_post["meta"]["squadriglia"], "Squadriglia 2")
+        self.assertEqual(payload_post["meta"]["specialita"], "Natura")
+        session = self.session_factory()
+        wordpress_post = session.query(daemon.WordpressPost).one()
+        self.assertEqual(wordpress_post.wordpress_id, 30)
+        self.assertEqual(wordpress_post.iscrizioni_id, 2)
+        self.assertEqual(wordpress_post.meta, payload_post)
+        session.close()
         for chiamata in mock_post.call_args_list + mock_get.call_args_list:
             self.assertEqual(chiamata.kwargs["timeout"], (5, 30))
 
